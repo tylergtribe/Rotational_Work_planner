@@ -131,20 +131,19 @@
 .app-shell.home-tint {
   --tint: 174 46% 29%;
   background:
-    radial-gradient(circle at 82% -8%, hsl(174 46% 29% / .28), transparent 34rem),
-    linear-gradient(135deg, hsl(222 24% 9%), hsl(219 26% 8%));
+    radial-gradient(circle at 82% -8%, hsl(174 46% 48% / .2), transparent 34rem),
+    linear-gradient(180deg, #0d211c 0%, #0b1b18 58%, #091311 100%);
 }
 .app-shell.work-tint {
   --tint: 17 75% 61%;
   background:
-    radial-gradient(circle at 82% -8%, hsl(17 75% 61% / .25), transparent 34rem),
-    linear-gradient(135deg, hsl(222 24% 9%), hsl(222 25% 8%));
+    radial-gradient(circle at 82% -8%, hsl(17 75% 68% / .2), transparent 34rem),
+    linear-gradient(180deg, #2a160f 0%, #21120e 58%, #12100f 100%);
 }
 .app-shell.transition-tint {
   --tint: 41 80% 61%;
   background:
-    linear-gradient(120deg, hsl(17 75% 61% / .12), transparent 45%, hsl(174 46% 29% / .2)),
-    hsl(222 24% 9%);
+    linear-gradient(180deg, #2a160f 0%, #2a160f 50%, #0d211c 50%, #0d211c 100%);
 }
 .noise::after {
   content: '';
@@ -188,6 +187,18 @@
 }
 .event-card { transition: transform .18s ease, filter .18s ease, border-color .18s ease; }
 .event-card:hover { transform: translateX(3px); filter: brightness(1.08); }
+.mode-cell-work {
+  background: #2a160f;
+  color: #f1ddd4;
+}
+.mode-cell-home {
+  background: #0d211c;
+  color: #d9eee6;
+}
+.mode-cell-transition {
+  background: linear-gradient(180deg, #2a160f 0%, #2a160f 50%, #0d211c 50%, #0d211c 100%);
+  color: #e8e6e1;
+}
 .modal-backdrop { animation: fade-in .2s ease both; }
 .modal-panel { animation: modal-in .26s cubic-bezier(.2,.8,.2,1) both; }
 @keyframes modal-in { from { opacity: 0; transform: translateY(12px) scale(.98); } to { opacity: 1; transform: translateY(0) scale(1); } }
