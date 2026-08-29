@@ -148,6 +148,21 @@
   background-image: linear-gradient(to bottom, hsl(220 15% 23% / .52) 1px, transparent 1px);
   background-size: 100% 59px;
 }
+.timeline-day-work {
+  background: #2a160f;
+  color: #f1ddd4;
+}
+.timeline-day-home {
+  background: #0d211c;
+  color: #d9eee6;
+}
+.timeline-day-transition {
+  background: linear-gradient(180deg, #2a160f 0%, #2a160f var(--transition-position, 50%), #0d211c var(--transition-position, 50%), #0d211c 100%);
+  color: #e8e6e1;
+}
+.timeline-day-transition-start {
+  background: linear-gradient(180deg, #0d211c 0%, #0d211c var(--transition-position, 50%), #2a160f var(--transition-position, 50%), #2a160f 100%);
+}
 .timeline-grid::before {
   content: '';
   position: absolute;
@@ -179,8 +194,11 @@
   color: #d9eee6;
 }
 .mode-cell-transition {
-  background: linear-gradient(180deg, #2a160f 0%, #2a160f 50%, #0d211c 50%, #0d211c 100%);
+  background: linear-gradient(180deg, #2a160f 0%, #2a160f var(--transition-position, 50%), #0d211c var(--transition-position, 50%), #0d211c 100%);
   color: #e8e6e1;
+}
+.mode-cell-transition-start {
+  background: linear-gradient(180deg, #0d211c 0%, #0d211c var(--transition-position, 50%), #2a160f var(--transition-position, 50%), #2a160f 100%);
 }
 .modal-backdrop { animation: fade-in .2s ease both; }
 .modal-panel { animation: modal-in .26s cubic-bezier(.2,.8,.2,1) both; }
