@@ -163,26 +163,6 @@
 .timeline-day-transition-start {
   background: linear-gradient(180deg, #0d211c 0%, #0d211c var(--transition-position, 50%), #2a160f var(--transition-position, 50%), #2a160f 100%);
 }
-.timeline-grid::before {
-  content: '';
-  position: absolute;
-  left: 0;
-  right: 0;
-  top: 50%;
-  border-top: 1px dashed hsl(41 80% 61% / .58);
-  pointer-events: none;
-}
-.timeline-grid::after {
-  content: '12:00 noon · night-shift window begins';
-  position: absolute;
-  right: 12px;
-  top: calc(50% - 20px);
-  color: hsl(41 80% 61% / .8);
-  font-family: 'DM Mono', monospace;
-  font-size: 9px;
-  letter-spacing: .04em;
-  pointer-events: none;
-}
 .event-card { transition: transform .18s ease, filter .18s ease, border-color .18s ease; }
 .event-card:hover { transform: translateX(3px); filter: brightness(1.08); }
 .mode-cell-work {
@@ -210,5 +190,4 @@
 @media (max-width: 767px) {
   .desktop-sidebar { display: none; }
   .mobile-nav { display: flex; }
-  .timeline-grid::after { content: '12 noon · shift window'; font-size: 8px; }
 }
