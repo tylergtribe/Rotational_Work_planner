@@ -1,0 +1,28 @@
+kind = "web"
+previewPath = "/"
+title = "Hitch Planner"
+description = "A mobile-first dark day-planning app for rotating work schedules, helping people plan work hitches, home stretches, transition days, and time blocks in one focused place."
+version = "1.0.0"
+id = "artifacts/hitch-planner"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 20263
+
+[services.development]
+run = "pnpm --filter @workspace/hitch-planner run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/hitch-planner", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/hitch-planner/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "20263"
+BASE_PATH = "/"
