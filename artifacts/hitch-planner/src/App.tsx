@@ -85,7 +85,7 @@ function resolveMode(date: string, config: HitchConfig, overrides: HitchOverride
   let mode: Mode = phase < config.workPhaseLength ? 'work' : 'home';
   if (override?.adjustment === 'flip') mode = mode === 'work' ? 'home' : 'work';
   if (override?.adjustment === 'work' || override?.adjustment === 'home' || override?.adjustment === 'transition') mode = override.adjustment;
-  if (!override && (phase === config.workPhaseLength - 1 || phase === total - 1)) mode = 'transition';
+  if (!override && (phase === config.workPhaseLength - 1 || phase === 0)) mode = 'transition';
   return mode;
 }
 
