@@ -145,6 +145,10 @@
   background:
     linear-gradient(180deg, #2a160f 0%, #2a160f var(--transition-position, 50%), #0d211c var(--transition-position, 50%), #0d211c 100%);
 }
+.app-shell.transition-tint.start-work-transition {
+  background:
+    linear-gradient(180deg, #0d211c 0%, #0d211c var(--transition-position, 50%), #2a160f var(--transition-position, 50%), #2a160f 100%);
+}
 .noise::after {
   content: '';
   position: fixed;
@@ -198,6 +202,9 @@
 .mode-cell-transition {
   background: linear-gradient(180deg, #2a160f 0%, #2a160f 50%, #0d211c 50%, #0d211c 100%);
   color: #e8e6e1;
+}
+.mode-cell-transition-start {
+  background: linear-gradient(180deg, #0d211c 0%, #0d211c 50%, #2a160f 50%, #2a160f 100%);
 }
 .modal-backdrop { animation: fade-in .2s ease both; }
 .modal-panel { animation: modal-in .26s cubic-bezier(.2,.8,.2,1) both; }
