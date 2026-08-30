@@ -146,7 +146,7 @@
 @keyframes rise-in { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
 .timeline-grid {
   background-image: linear-gradient(to bottom, hsl(220 15% 23% / .52) 1px, transparent 1px);
-  background-size: 100% 59px;
+  background-size: 100% 60px;
 }
 .timeline-day-work {
   background: #2a160f;

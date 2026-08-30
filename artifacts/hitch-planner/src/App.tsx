@@ -83,6 +83,27 @@ const formatShortDate = (value: string) => parseDate(value).toLocaleDateString(u
 const monthTitle = (date: Date) => date.toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
 const uid = () => `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 const minutes = (value: string) => { const [h, m] = value.split(':').map(Number); return h * 60 + m; };
+const HOUR_PX = 60;
+type LaidOutBlock = { block: Block; start: number; end: number; col: number; cols: number };
+function layoutBlocks(blocks: Block[]): LaidOutBlock[] {
+  const items: LaidOutBlock[] = blocks
+    .map((block) => { const start = minutes(block.startTime); let end = minutes(block.endTime); if (end <= start) end = 1440; return { block, start, end: Math.min(1440, Math.max(start + 5, end)), col: 0, cols: 1 }; })
+    .sort((a, b) => a.start - b.start || a.end - b.end);
+  let cluster: LaidOutBlock[] = [];
+  let clusterEnd = -1;
+  const flush = () => { if (!cluster.length) return; const cols = Math.max(...cluster.map((i) => i.col)) + 1; cluster.forEach((i) => { i.cols = cols; }); cluster = []; };
+  for (const item of items) {
+    if (cluster.length && item.start >= clusterEnd) flush();
+    const taken = new Set(cluster.filter((i) => i.end > item.start).map((i) => i.col));
+    let col = 0;
+    while (taken.has(col)) col += 1;
+    item.col = col;
+    cluster.push(item);
+    clusterEnd = Math.max(clusterEnd, item.end);
+  }
+  flush();
+  return items;
+}
 const timeLabel = (value: string) => {
   const [h, m] = value.split(':').map(Number); const suffix = h >= 12 ? 'PM' : 'AM'; const hour = h % 12 || 12;
   return `${hour}:${String(m).padStart(2, '0')} ${suffix}`;
@@ -330,15 +351,17 @@ function Timeline({ date, blocks, templates, config, overrides, daySettings, mod
   const hours = Array.from({ length: 9 }, (_, i) => i * 3);
   return <section className="mt-7 overflow-hidden rounded-2xl border border-white/[.1] bg-black/[.14]">
      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/[.08] px-4 py-3"><div className="flex items-center gap-2 text-xs text-muted-foreground"><span className="h-1.5 w-1.5 rounded-full bg-accent" /><span>24-hour view</span>{nightShift && <span className="rounded-full bg-accent/10 px-2 py-1 font-mono-app text-[9px] uppercase tracking-[.1em] text-[#efc166]">Night shift · noon to noon</span>}</div><div className="flex flex-wrap items-center gap-2"><TemplatePicker templates={templates} onUse={onUseTemplate} onEdit={onEditTemplate} onSave={onSaveTemplate} /><button type="button" onClick={onAdd} data-testid="button-add-block" className="flex items-center gap-1.5 rounded-lg bg-primary px-3 py-2 text-xs font-bold text-primary-foreground transition hover:brightness-110"><Plus size={15} />Add block</button></div></div>
-    <div className={`relative flex min-h-[730px] px-3 py-5 sm:px-5 ${timelineClass}`} style={timelineStyle}>
-      <div className="w-14 shrink-0 sm:w-20">{hours.map((hour) => <div key={hour} className="h-[88px] -translate-y-2 font-mono-app text-[10px] text-muted-foreground">{hour === 0 ? '12 AM' : hour === 12 ? '12 PM' : `${hour > 12 ? hour - 12 : hour} ${hour > 12 ? 'PM' : 'AM'}`}</div>)}</div>
-      <div className="timeline-grid relative min-h-[704px] flex-1 border-l border-white/[.1]">
+    <div className={`relative flex min-h-[1480px] px-3 py-5 sm:px-5 ${timelineClass}`} style={timelineStyle}>
+      <div className="w-14 shrink-0 sm:w-20">{hours.map((hour) => <div key={hour} className="h-[180px] -translate-y-2 font-mono-app text-[10px] text-muted-foreground">{hour === 0 || hour === 24 ? '12 AM' : hour === 12 ? '12 PM' : `${hour > 12 ? hour - 12 : hour} ${hour >= 12 ? 'PM' : 'AM'}`}</div>)}</div>
+      <div className="timeline-grid relative h-[1440px] flex-1 border-l border-white/[.1]">
         {nightShift && <div className="pointer-events-none absolute inset-x-0 top-1/2 h-1/2 bg-accent/[.025]" />}
         {blocks.length === 0 && <div className="absolute inset-x-4 top-[25%] text-center"><div className="mx-auto mb-3 flex h-11 w-11 items-center justify-center rounded-2xl border border-white/[.1] bg-white/[.04] text-muted-foreground"><Sun size={19} /></div><p className="font-display text-sm font-semibold">A clear run ahead</p><button type="button" onClick={onAdd} data-testid="button-add-first-block" className="mt-4 text-xs font-bold text-primary hover:underline">Add your first block</button></div>}
-        {blocks.map((block) => {
-          const start = minutes(block.startTime); const end = Math.max(start + 30, minutes(block.endTime)); const top = (start / 1440) * 100; const height = ((end - start) / 1440) * 100;
-          return <button type="button" key={block.id} onClick={() => onEdit(block)} data-testid={`card-block-${block.id}`} className="event-card absolute left-3 right-3 z-10 overflow-hidden rounded-xl border border-white/20 px-3 py-2 text-left shadow-lg" style={{ top: `${top}%`, height: `max(42px, ${height}%)`, backgroundColor: `${block.color}dd`, borderLeft: `4px solid ${block.color}` }}>
-            <span className="block truncate text-sm font-bold text-white">{block.title}</span><span className="mt-0.5 block font-mono-app text-[10px] text-white/75">{timeLabel(block.startTime)} — {timeLabel(block.endTime)}</span>
+        {layoutBlocks(blocks).map(({ block, start, end, col, cols }) => {
+          const duration = end - start;
+          const compact = duration < 26;
+          const showTime = duration >= 44;
+          return <button type="button" key={block.id} onClick={() => onEdit(block)} data-testid={`card-block-${block.id}`} className={`event-card absolute z-10 overflow-hidden rounded-xl border border-white/20 text-left shadow-lg ${compact ? 'px-2 py-0' : 'px-3 py-1.5'}`} style={{ top: `${start}px`, height: `${Math.max(13, duration - 2)}px`, left: `calc(0.75rem + (100% - 1.5rem) * ${col / cols})`, width: `calc((100% - 1.5rem) / ${cols} - 3px)`, backgroundColor: `${block.color}dd`, borderLeft: `4px solid ${block.color}` }}>
+            <span className={`block truncate font-bold leading-tight text-white ${compact ? 'text-[10px]' : 'text-sm'}`}>{block.title}</span>{showTime && <span className="mt-0.5 block truncate font-mono-app text-[10px] text-white/75">{timeLabel(block.startTime)} — {timeLabel(block.endTime)}</span>}
           </button>;
         })}
       </div>
