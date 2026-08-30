@@ -1,6 +1,6 @@
-# [Project name]
+# Hitch — Rotational Work Planner
 
-_Replace the heading above with the project's name, and this line with one sentence describing what this app does for users._
+A planner for rotational workers: tracks work/home cycles ("hitches"), shows a 24-hour daily timeline with schedule blocks, supports day/block templates with repeat cadences, and handles schedule overrides like extended hitches. All data is stored client-side in localStorage.
 
 ## Run & Operate
 
