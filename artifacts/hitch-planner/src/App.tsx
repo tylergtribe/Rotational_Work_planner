@@ -521,8 +521,14 @@ function Router() {
     setTemplates([...templates, template]);
     const indexById = new Map(dayBlocks.map((item, index) => [item.id, index]));
     const recurring = cadence !== 'one-time';
+    const dayTemplateIds = new Set(templates.filter((item) => item.kind !== 'block').map((item) => item.id));
+    const supersededOnFutureDay = (block: Block) => recurring
+      && block.date > date
+      && templateAppliesOn(block.date, template, config, overrides)
+      && !!block.templateId
+      && dayTemplateIds.has(block.templateId);
     setBlocks(blocks
-      .filter((block) => block.date === date || !recurring || block.date <= date || !templateAppliesOn(block.date, template, config, overrides))
+      .filter((block) => !supersededOnFutureDay(block))
       .map((block) => {
         if (block.date !== date) return block;
         const index = indexById.get(block.id);
