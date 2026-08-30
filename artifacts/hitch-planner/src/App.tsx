@@ -146,16 +146,20 @@ const parseGeneratedOccurrence = (id: string) => {
   return { templateId: parts[1], date: parts[2], index: Number(parts[3]), occurrenceKey: `${parts[2]}:${parts[3]}` };
 };
 
+function templateAppliesOn(date: string, template: Template, config: HitchConfig, overrides: HitchOverride[]) {
+  const cadence = template.cadence ?? 'one-time';
+  if (!template.enabled || cadence === 'one-time' || !template.startDate || date < template.startDate || resolveMode(date, config, overrides) !== 'work') return false;
+  const daysSinceStart = diffDays(template.startDate, date);
+  const interval = cadence === 'weekly' ? 7 : cadence === 'biweekly' ? 14 : 1;
+  return cadence === 'daily' || (daysSinceStart >= 0 && daysSinceStart % interval === 0);
+}
+
 function templateOccurrences(date: string, templates: Template[], config: HitchConfig, overrides: HitchOverride[]) {
-  return templates.flatMap((template) => {
-    const cadence = template.cadence ?? 'one-time';
-    if (!template.enabled || cadence === 'one-time' || !template.startDate || date < template.startDate || resolveMode(date, config, overrides) !== 'work') return [];
-    const daysSinceStart = diffDays(template.startDate, date);
-    const interval = cadence === 'weekly' ? 7 : cadence === 'biweekly' ? 14 : 1;
-    const eligible = cadence === 'daily' || (daysSinceStart >= 0 && daysSinceStart % interval === 0);
-    if (!eligible) return [];
-    return template.blocks.map((content, index) => ({ template, content, index }));
-  });
+  const eligible = templates.filter((template) => templateAppliesOn(date, template, config, overrides));
+  const dayTemplates = eligible.filter((template) => template.kind !== 'block');
+  const newestDay = dayTemplates.length > 0 ? dayTemplates[dayTemplates.length - 1] : null;
+  const active = eligible.filter((template) => template.kind === 'block' || template === newestDay);
+  return active.flatMap((template) => template.blocks.map((content, index) => ({ template, content, index })));
 }
 
 function blocksForDate(date: string, blocks: Block[], templates: Template[], config: HitchConfig, overrides: HitchOverride[]): Block[] {
@@ -509,17 +513,21 @@ function Router() {
     if (changed) setBlocks(next);
   }, []);
   const saveDayTemplate = (date: string, name: string, cadence: TemplateCadence, startDate: string) => {
-    const source = blocksForDate(date, blocks, templates, config, overrides).map(({ startTime, endTime, title, color }) => ({ startTime, endTime, title, color }));
+    const dayBlocks = blocksForDate(date, blocks, templates, config, overrides);
+    const source = dayBlocks.map(({ startTime, endTime, title, color }) => ({ startTime, endTime, title, color }));
     if (source.length === 0) return;
     const templateId = uid();
-    setTemplates([...templates, { id: templateId, name, blocks: source, kind: 'day', cadence, startDate: startDate || date, enabled: true, exceptions: {} }]);
-    const claimedOnDate = blocksForDate(date, blocks, templates, config, overrides);
-    const stored = blocks.filter((block) => block.date === date);
-    setBlocks(blocks.map((block) => {
-      if (block.date !== date || !stored.includes(block)) return block;
-      const index = claimedOnDate.findIndex((item) => item.id === block.id);
-      return index === -1 ? block : { ...block, templateId, templateIndex: index };
-    }));
+    const template: Template = { id: templateId, name, blocks: source, kind: 'day', cadence, startDate: startDate || date, enabled: true, exceptions: {} };
+    setTemplates([...templates, template]);
+    const indexById = new Map(dayBlocks.map((item, index) => [item.id, index]));
+    const recurring = cadence !== 'one-time';
+    setBlocks(blocks
+      .filter((block) => block.date === date || !recurring || block.date <= date || !templateAppliesOn(block.date, template, config, overrides))
+      .map((block) => {
+        if (block.date !== date) return block;
+        const index = indexById.get(block.id);
+        return index === undefined ? block : { ...block, templateId, templateIndex: index };
+      }));
   };
   const useDayTemplate = (date: string, template: Template) => {
     const generatedOnDate = blocksForDate(date, blocks, templates, config, overrides).filter((block) => block.templateId && block.occurrenceKey);
