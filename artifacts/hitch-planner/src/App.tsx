@@ -41,7 +41,7 @@ type TransitionDirection = 'go-home' | 'start-work';
 type Adjustment = Mode | 'flip';
 type BlockColor = '#534AB7' | '#0F6E56' | '#D85A30' | '#993556' | '#185FA5' | '#3B6D11' | '#854F0B' | '#A32D2D' | '#5F5E5A';
 type BlockContent = { startTime: string; endTime: string; title: string; color: BlockColor };
-type Block = BlockContent & { id: string; date: string; templateId?: string; occurrenceKey?: string };
+type Block = BlockContent & { id: string; date: string; templateId?: string; templateIndex?: number; occurrenceKey?: string };
 type HitchConfig = { cycleStartDate: string; workPhaseLength: number; homePhaseLength: number; defaultNightShift: boolean; goHomeTransitionHour: number; startWorkTransitionHour: number };
 type HitchOverride = { id: string; startDate: string; endDate: string; label: string; adjustment: Adjustment };
 type DaySettings = { transitionHour?: number; nightShiftOverride: boolean | null };
@@ -146,31 +146,34 @@ const parseGeneratedOccurrence = (id: string) => {
   return { templateId: parts[1], date: parts[2], index: Number(parts[3]), occurrenceKey: `${parts[2]}:${parts[3]}` };
 };
 
-function blocksForDate(date: string, blocks: Block[], templates: Template[], config: HitchConfig, overrides: HitchOverride[]): Block[] {
-  const stored = blocks.filter((block) => block.date === date);
-  const generated = templates.flatMap((template) => {
+function templateOccurrences(date: string, templates: Template[], config: HitchConfig, overrides: HitchOverride[]) {
+  return templates.flatMap((template) => {
     const cadence = template.cadence ?? 'one-time';
     if (!template.enabled || cadence === 'one-time' || !template.startDate || date < template.startDate || resolveMode(date, config, overrides) !== 'work') return [];
     const daysSinceStart = diffDays(template.startDate, date);
     const interval = cadence === 'weekly' ? 7 : cadence === 'biweekly' ? 14 : 1;
     const eligible = cadence === 'daily' || (daysSinceStart >= 0 && daysSinceStart % interval === 0);
     if (!eligible) return [];
-    return template.blocks.flatMap((content, index) => {
-      const occurrenceKey = `${date}:${index}`;
-      const exception = template.exceptions?.[occurrenceKey];
-      if (exception?.action === 'delete') return [];
-      const data = exception?.action === 'update' && exception.data ? exception.data : content;
-      return [{ ...data, id: generatedOccurrenceId(template.id, date, index), date, templateId: template.id, occurrenceKey }];
-    });
+    return template.blocks.map((content, index) => ({ template, content, index }));
   });
-  const signatures = new Set(stored.map((block) => `${block.startTime}|${block.endTime}|${block.title}|${block.color}`));
-  const uniqueGenerated = generated.filter((block) => {
-    const signature = `${block.startTime}|${block.endTime}|${block.title}|${block.color}`;
-    if (signatures.has(signature)) return false;
-    signatures.add(signature);
-    return true;
+}
+
+function blocksForDate(date: string, blocks: Block[], templates: Template[], config: HitchConfig, overrides: HitchOverride[]): Block[] {
+  const stored = blocks.filter((block) => block.date === date);
+  const claimed = new Set(stored.filter((block) => block.templateId && block.templateIndex !== undefined).map((block) => `${block.templateId}:${block.templateIndex}`));
+  const seen = new Set<string>();
+  const generated = templateOccurrences(date, templates, config, overrides).flatMap(({ template, content, index }) => {
+    if (claimed.has(`${template.id}:${index}`)) return [];
+    const occurrenceKey = `${date}:${index}`;
+    const exception = template.exceptions?.[occurrenceKey];
+    if (exception?.action === 'delete') return [];
+    const data = exception?.action === 'update' && exception.data ? exception.data : content;
+    const signature = `${data.startTime}|${data.endTime}|${data.title}|${data.color}`;
+    if (seen.has(signature)) return [];
+    seen.add(signature);
+    return [{ ...data, id: generatedOccurrenceId(template.id, date, index), date, templateId: template.id, occurrenceKey }];
   });
-  return [...stored, ...uniqueGenerated].sort((a, b) => minutes(a.startTime) - minutes(b.startTime));
+  return [...stored, ...generated].sort((a, b) => minutes(a.startTime) - minutes(b.startTime));
 }
 
 function automaticTransitionDirection(date: string, config: HitchConfig): TransitionDirection | null {
@@ -484,10 +487,39 @@ function Router() {
   const setOverrides = (next: HitchOverride[]) => { setOverridesState(next); persist('overrides', next); };
   const setDaySettings = (next: Record<string, DaySettings>) => { setDaySettingsState(next); persist('daySettings', next); };
   const setTemplates = (next: Template[]) => { setTemplatesState(next); persist('templates', next); };
+  const migrated = useRef(false);
+  useEffect(() => {
+    if (migrated.current) return;
+    migrated.current = true;
+    const untagged = blocks.filter((block) => !block.templateId);
+    if (untagged.length === 0 || templates.length === 0) return;
+    const byDate = new Map<string, { template: Template; content: BlockContent; index: number }[]>();
+    let changed = false;
+    const next = blocks.map((block) => {
+      if (block.templateId) return block;
+      if (!byDate.has(block.date)) byDate.set(block.date, templateOccurrences(block.date, templates, config, overrides));
+      const pool = byDate.get(block.date)!;
+      const match = pool.findIndex(({ content }) => content.startTime === block.startTime && content.endTime === block.endTime && content.title === block.title && content.color === block.color);
+      if (match === -1) return block;
+      const { template, index } = pool[match];
+      pool.splice(match, 1);
+      changed = true;
+      return { ...block, templateId: template.id, templateIndex: index };
+    });
+    if (changed) setBlocks(next);
+  }, []);
   const saveDayTemplate = (date: string, name: string, cadence: TemplateCadence, startDate: string) => {
     const source = blocksForDate(date, blocks, templates, config, overrides).map(({ startTime, endTime, title, color }) => ({ startTime, endTime, title, color }));
     if (source.length === 0) return;
-    setTemplates([...templates, { id: uid(), name, blocks: source, kind: 'day', cadence, startDate: startDate || date, enabled: true, exceptions: {} }]);
+    const templateId = uid();
+    setTemplates([...templates, { id: templateId, name, blocks: source, kind: 'day', cadence, startDate: startDate || date, enabled: true, exceptions: {} }]);
+    const claimedOnDate = blocksForDate(date, blocks, templates, config, overrides);
+    const stored = blocks.filter((block) => block.date === date);
+    setBlocks(blocks.map((block) => {
+      if (block.date !== date || !stored.includes(block)) return block;
+      const index = claimedOnDate.findIndex((item) => item.id === block.id);
+      return index === -1 ? block : { ...block, templateId, templateIndex: index };
+    }));
   };
   const useDayTemplate = (date: string, template: Template) => {
     const generatedOnDate = blocksForDate(date, blocks, templates, config, overrides).filter((block) => block.templateId && block.occurrenceKey);
@@ -497,7 +529,7 @@ function Router() {
       return { ...item, exceptions: skipped.reduce((next, block) => ({ ...next, [block.occurrenceKey!]: { action: 'delete' as const } }), { ...item.exceptions }) };
     });
     if (nextTemplates !== templates) setTemplates(nextTemplates);
-    const applied = template.blocks.map((block) => ({ ...block, id: uid(), date }));
+    const applied = template.blocks.map((block, index) => ({ ...block, id: uid(), date, templateId: template.id, templateIndex: index }));
     setBlocks([...blocks.filter((block) => block.date !== date), ...applied]);
   };
   const updateTemplate = (id: string, changes: { name: string; cadence: TemplateCadence; startDate: string; enabled: boolean }) => setTemplates(templates.map((template) => template.id === id ? { ...template, ...changes } : template));
@@ -515,7 +547,17 @@ function Router() {
   };
   const deleteBlock = (id: string) => {
     const generated = parseGeneratedOccurrence(id);
-    if (!generated) { setBlocks(blocks.filter((block) => block.id !== id)); return; }
+    if (!generated) {
+      const target = blocks.find((block) => block.id === id);
+      setBlocks(blocks.filter((block) => block.id !== id));
+      if (target?.templateId && target.templateIndex !== undefined) {
+        const occurrenceKey = `${target.date}:${target.templateIndex}`;
+        setTemplates(templates.map((template) => template.id === target.templateId
+          ? { ...template, exceptions: { ...template.exceptions, [occurrenceKey]: { action: 'delete' } } }
+          : template));
+      }
+      return;
+    }
     setTemplates(templates.map((template) => template.id === generated.templateId
       ? { ...template, exceptions: { ...template.exceptions, [generated.occurrenceKey]: { action: 'delete' } } }
       : template));
