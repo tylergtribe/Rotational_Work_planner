@@ -123,10 +123,7 @@
 ::selection { background: hsl(17 75% 61% / .32); color: hsl(35 29% 97%); }
 
 .app-shell {
-  background:
-    radial-gradient(circle at 82% -8%, hsl(220 18% 18% / .2), transparent 34rem),
-    linear-gradient(135deg, hsl(222 24% 9%), hsl(222 24% 7%));
-  transition: background 420ms ease;
+  background: hsl(222 24% 8%);
 }
 .noise::after {
   content: '';

@@ -19,13 +19,12 @@ import {
   Copy,
   Home as HomeIcon,
   Layers3,
-  Menu,
+  MoreHorizontal,
   Moon,
   Pencil,
   Plus,
   RotateCcw,
   Save,
-  Settings,
   Settings2,
   SlidersHorizontal,
   Sparkles,
@@ -84,25 +83,95 @@ const monthTitle = (date: Date) => date.toLocaleDateString(undefined, { month: '
 const uid = () => `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 const minutes = (value: string) => { const [h, m] = value.split(':').map(Number); return h * 60 + m; };
 const HOUR_PX = 60;
-type LaidOutBlock = { block: Block; start: number; end: number; col: number; cols: number };
-function layoutBlocks(blocks: Block[]): LaidOutBlock[] {
-  const items: LaidOutBlock[] = blocks
-    .map((block) => { const start = minutes(block.startTime); let end = minutes(block.endTime); if (end <= start) end = 1440; return { block, start, end: Math.min(1440, Math.max(start + 5, end)), col: 0, cols: 1 }; })
+type TimedBlock = { block: Block; start: number; end: number; duration: number };
+type BarSegment = { width: number; color?: string; isGap: boolean };
+type TimelineSegment = { block: Block; start: number; end: number; color: string; isOverlap: boolean; layer: number };
+
+function timedBlocks(blocks: Block[]): TimedBlock[] {
+  return blocks
+    .map((block) => {
+      const start = minutes(block.startTime);
+      let end = minutes(block.endTime);
+      if (end <= start) end = 1440;
+      end = Math.min(1440, Math.max(start + 5, end));
+      return { block, start, end, duration: end - start };
+    })
     .sort((a, b) => a.start - b.start || a.end - b.end);
-  let cluster: LaidOutBlock[] = [];
-  let clusterEnd = -1;
-  const flush = () => { if (!cluster.length) return; const cols = Math.max(...cluster.map((i) => i.col)) + 1; cluster.forEach((i) => { i.cols = cols; }); cluster = []; };
+}
+
+function mixColors(values: string[]): string {
+  const channels = values.map((value) => {
+    const hex = value.replace('#', '');
+    return [Number.parseInt(hex.slice(0, 2), 16), Number.parseInt(hex.slice(2, 4), 16), Number.parseInt(hex.slice(4, 6), 16)];
+  });
+  const average = (index: number) => Math.round(channels.reduce((sum, channel) => sum + channel[index], 0) / channels.length);
+  return `rgb(${average(0)}, ${average(1)}, ${average(2)})`;
+}
+
+function computeBarSegments(blocks: Block[], minPct = 2.2): BarSegment[] {
+  const items = timedBlocks(blocks);
+  const boundaries = Array.from(new Set([0, 1440, ...items.flatMap((item) => [item.start, item.end])])).sort((a, b) => a - b);
+  const raw = boundaries.slice(0, -1).flatMap((start, index) => {
+    const end = boundaries[index + 1];
+    if (end <= start) return [];
+    const active = items.filter((item) => item.start < end && item.end > start);
+    return [{ width: ((end - start) / 1440) * 100, color: active.length ? mixColors(active.map((item) => item.block.color)) : undefined, isGap: active.length === 0 }];
+  }).reduce<BarSegment[]>((segments, segment) => {
+    const previous = segments.at(-1);
+    if (previous && previous.isGap === segment.isGap && previous.color === segment.color) previous.width += segment.width;
+    else segments.push(segment);
+    return segments;
+  }, []);
+  const totalGap = raw.filter((segment) => segment.isGap).reduce((sum, segment) => sum + segment.width, 0);
+  const desiredExpansion = raw.filter((segment) => !segment.isGap).reduce((sum, segment) => sum + Math.max(0, minPct - segment.width), 0);
+  const expansion = Math.min(totalGap, desiredExpansion);
+  const expansionScale = desiredExpansion > 0 ? expansion / desiredExpansion : 0;
+  const gapScale = totalGap > 0 ? (totalGap - expansion) / totalGap : 0;
+  return raw.map((segment) => ({
+    ...segment,
+    width: segment.isGap ? segment.width * gapScale : segment.width + Math.max(0, minPct - segment.width) * expansionScale,
+  }));
+}
+
+function buildTimelineSegments(blocks: Block[]): TimelineSegment[] {
+  const items = timedBlocks(blocks);
+  const groups: TimedBlock[][] = [];
   for (const item of items) {
-    if (cluster.length && item.start >= clusterEnd) flush();
-    const taken = new Set(cluster.filter((i) => i.end > item.start).map((i) => i.col));
-    let col = 0;
-    while (taken.has(col)) col += 1;
-    item.col = col;
-    cluster.push(item);
-    clusterEnd = Math.max(clusterEnd, item.end);
+    const group = groups.at(-1);
+    const groupEnd = group ? Math.max(...group.map((entry) => entry.end)) : -1;
+    if (!group || item.start >= groupEnd) groups.push([item]);
+    else group.push(item);
   }
-  flush();
-  return items;
+  return groups.flatMap((group) => {
+    const ordered = [...group].sort((a, b) => b.duration - a.duration || a.start - b.start);
+    const segments: TimelineSegment[] = [];
+    ordered.forEach((item, layer) => {
+      if (layer === 0) {
+        segments.push({ block: item.block, start: item.start, end: item.end, color: item.block.color, isOverlap: false, layer });
+        return;
+      }
+      const earlier = ordered.slice(0, layer);
+      const boundaries = Array.from(new Set([
+        item.start,
+        item.end,
+        ...earlier.flatMap((other) => [Math.max(item.start, other.start), Math.min(item.end, other.end)]),
+      ].filter((point) => point >= item.start && point <= item.end))).sort((a, b) => a - b);
+      boundaries.slice(0, -1).forEach((start, index) => {
+        const end = boundaries[index + 1];
+        if (end <= start) return;
+        const underneath = earlier.filter((other) => other.start < end && other.end > start);
+        segments.push({
+          block: item.block,
+          start,
+          end,
+          color: underneath.length ? mixColors([...underneath.map((other) => other.block.color), item.block.color]) : item.block.color,
+          isOverlap: underneath.length > 0,
+          layer,
+        });
+      });
+    });
+    return segments;
+  });
 }
 const timeLabel = (value: string) => {
   const [h, m] = value.split(':').map(Number); const suffix = h >= 12 ? 'PM' : 'AM'; const hour = h % 12 || 12;
@@ -232,9 +301,10 @@ function resolveMode(date: string, config: HitchConfig, overrides: HitchOverride
 function AppShell({ children, mode }: { children: ReactNode; mode: Mode }) {
   const [location] = useLocation();
   const nav = [
-    { href: '/', label: 'Today', icon: Clock3 },
-    { href: '/calendar', label: 'Calendar', icon: CalendarDays },
+    { href: '/', label: 'Day', icon: Clock3 },
+    { href: '/calendar', label: 'Month', icon: CalendarDays },
     { href: '/hitch', label: 'Hitch', icon: Layers3 },
+    { href: '/year', label: 'Year', icon: CalendarRange },
     { href: '/settings', label: 'Settings', icon: Settings2 },
   ];
   return (
@@ -266,9 +336,8 @@ function AppShell({ children, mode }: { children: ReactNode; mode: Mode }) {
             <div className="flex items-center gap-2 md:hidden">
               <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary text-primary-foreground"><ArrowDownToLine size={16} /></span>
               <span className="font-display font-bold">Hitch<span className="text-primary">.</span></span>
-              <DropdownMenu><DropdownMenuTrigger asChild><button type="button" aria-label="Open navigation menu" data-testid="button-mobile-navigation" className="ml-1 flex h-8 w-8 items-center justify-center rounded-lg border border-white/[.1] text-muted-foreground hover:bg-white/[.08] hover:text-foreground"><Menu size={16} /></button></DropdownMenuTrigger><DropdownMenuContent align="start" className="z-[70] w-44 border-white/[.12] bg-[hsl(221_22%_13%/.98)] p-1.5 text-foreground shadow-2xl backdrop-blur-xl">{nav.map(({ href, label, icon: Icon }) => <DropdownMenuItem key={href} asChild className="focus:bg-white/[.08] focus:text-foreground"><Link href={href} data-testid={`link-mobile-${label.toLowerCase()}`} className="flex w-full items-center gap-2.5 text-xs no-underline"><Icon size={15} className="text-primary" />{label}</Link></DropdownMenuItem>)}</DropdownMenuContent></DropdownMenu>
             </div>
-            <div className="ml-auto flex items-center gap-2 text-xs text-muted-foreground"><span className="h-1.5 w-1.5 rounded-full bg-secondary" /><span>Saved</span></div>
+            <div className="ml-auto flex items-center gap-2 text-xs text-muted-foreground"><span className="h-1.5 w-1.5 rounded-full bg-secondary" /><span>Saved</span><Link href="/settings" aria-label="Open settings" data-testid="link-mobile-settings" className={`ml-1 flex h-8 w-8 items-center justify-center rounded-lg border border-white/[.1] no-underline transition md:hidden ${location === '/settings' ? 'bg-white/[.1] text-primary' : 'text-muted-foreground hover:bg-white/[.08] hover:text-foreground'}`}><Settings2 size={16} /></Link></div>
           </header>
           <div className="px-5 md:px-10">{children}</div>
         </main>
@@ -277,58 +346,16 @@ function AppShell({ children, mode }: { children: ReactNode; mode: Mode }) {
   );
 }
 
-function PhaseBadge({ mode }: { mode: Mode }) {
-  const Icon = mode === 'work' ? BriefcaseBusiness : mode === 'home' ? HomeIcon : RotateCcw;
-  return <span data-testid={`status-phase-${mode}`} className="inline-flex items-center gap-1.5 rounded-full border border-white/[.12] bg-white/[.06] px-2.5 py-1 font-mono-app text-[10px] uppercase tracking-[.12em] text-foreground"><Icon size={12} />{mode}</span>;
-}
-
-function DatePicker({ date, onChange }: { date: string; onChange: (date: string) => void }) {
-  const [open, setOpen] = useState(false);
-  const [month, setMonth] = useState(() => {
-    const selected = parseDate(date);
-    return new Date(selected.getFullYear(), selected.getMonth(), 1);
-  });
-  const first = (month.getDay() + 6) % 7;
-  const days = new Date(month.getFullYear(), month.getMonth() + 1, 0).getDate();
-  const cells = Array.from({ length: Math.ceil((first + days) / 7) * 7 }, (_, index) => {
-    const day = index - first + 1;
-    return day > 0 && day <= days
-      ? toDateString(new Date(month.getFullYear(), month.getMonth(), day))
-      : null;
-  });
-
-  useEffect(() => {
-    const selected = parseDate(date);
-    setMonth(new Date(selected.getFullYear(), selected.getMonth(), 1));
-  }, [date]);
-
-  return <div className="relative">
-    <button
-      type="button"
-      aria-label={`Choose date, currently ${formatLongDate(date)}`}
-      aria-expanded={open}
-      onClick={() => setOpen(!open)}
-      data-testid="button-open-date-picker"
-      className="flex items-center gap-2 rounded-xl border border-white/[.1] bg-white/[.045] px-3 py-2.5 font-mono-app text-[10px] uppercase tracking-[.12em] text-muted-foreground transition hover:bg-white/[.08] hover:text-foreground"
-    >
-      <CalendarDays size={15} className="text-primary" />
-      <span>{formatShortDate(date)}</span>
-    </button>
-    {open && <div className="absolute right-0 top-full z-30 mt-2 w-[min(20rem,calc(100vw-2rem))] rounded-2xl border border-white/[.12] bg-[hsl(221_22%_13%/.98)] p-4 shadow-2xl backdrop-blur-xl" data-testid="date-picker-popover">
-      <div className="mb-3 flex items-center justify-between">
-        <p className="font-display text-sm font-bold">{monthTitle(month)}</p>
-        <div className="flex gap-1">
-          <button type="button" aria-label="Previous month" onClick={() => setMonth(new Date(month.getFullYear(), month.getMonth() - 1, 1))} className="rounded-lg p-1.5 text-muted-foreground hover:bg-white/[.08] hover:text-foreground"><ChevronLeft size={15} /></button>
-          <button type="button" aria-label="Next month" onClick={() => setMonth(new Date(month.getFullYear(), month.getMonth() + 1, 1))} className="rounded-lg p-1.5 text-muted-foreground hover:bg-white/[.08] hover:text-foreground"><ChevronRight size={15} /></button>
-        </div>
-      </div>
-      <div className="grid grid-cols-7 gap-1 text-center">
-        {['M', 'T', 'W', 'T', 'F', 'S', 'S'].map((day, index) => <span key={`${day}-${index}`} className="pb-1 font-mono-app text-[9px] text-muted-foreground">{day}</span>)}
-        {cells.map((cell, index) => cell ? <button type="button" key={cell} onClick={() => { onChange(cell); setOpen(false); }} data-testid={`date-picker-day-${cell}`} className={`flex h-8 items-center justify-center rounded-lg text-xs transition hover:bg-white/[.1] ${cell === date ? 'bg-primary font-bold text-primary-foreground' : cell === todayString() ? 'border border-primary/50 text-primary' : 'text-foreground/80'}`}>{parseDate(cell).getDate()}</button> : <span key={`empty-${index}`} />)}
-      </div>
-      <button type="button" onClick={() => { onChange(todayString()); setOpen(false); }} data-testid="button-date-picker-today" className="mt-3 w-full rounded-lg border border-white/[.1] py-2 text-xs font-semibold text-muted-foreground transition hover:bg-white/[.06] hover:text-foreground">Jump to today</button>
-    </div>}
-  </div>;
+function ViewTabs({ current, date = todayString() }: { current?: 'hitch' | 'month' | 'day' | 'year'; date?: string }) {
+  const items = [
+    { key: 'day' as const, label: 'Day', href: `/?date=${date}` },
+    { key: 'month' as const, label: 'Month', href: `/calendar?month=${date.slice(0, 7)}` },
+    { key: 'hitch' as const, label: 'Hitch', href: '/hitch' },
+    { key: 'year' as const, label: 'Year', href: `/year?year=${date.slice(0, 4)}` },
+  ];
+  return <nav aria-label="Calendar views" className="mt-5 grid w-full max-w-[340px] grid-cols-4 rounded-lg border border-white/[.1] bg-black/[.14] p-1">
+    {items.map((item) => <Link key={item.key} href={item.href} aria-current={current === item.key ? 'page' : undefined} className={`rounded-md px-1 py-2 text-center text-[11px] font-semibold no-underline transition sm:px-3 sm:text-xs ${current === item.key ? 'bg-white/[.12] text-foreground shadow-sm' : 'text-muted-foreground hover:bg-white/[.06] hover:text-foreground'}`}>{item.label}</Link>)}
+  </nav>;
 }
 
 function BlockModal({ block, date, templates, onClose, onSave, onDelete, onEditTemplate }: { block?: Block; date: string; templates: Template[]; onClose: () => void; onSave: (data: BlockContent, options: { cadence: TemplateCadence; startDate: string; saveAsTemplate: boolean }) => void; onDelete?: () => void; onEditTemplate: (template: Template, trigger: HTMLButtonElement) => void }) {
@@ -359,7 +386,7 @@ function BlockModal({ block, date, templates, onClose, onSave, onDelete, onEditT
   </div>;
 }
 
-function Timeline({ date, blocks, templates, config, overrides, daySettings, mode, onAdd, onEdit, onUseTemplate, onEditTemplate, onSaveTemplate }: { date: string; blocks: Block[]; templates: Template[]; config: HitchConfig; overrides: HitchOverride[]; daySettings?: DaySettings; mode: Mode; onAdd: () => void; onEdit: (block: Block) => void; onUseTemplate: (template: Template) => void; onEditTemplate: (template: Template, trigger: HTMLButtonElement) => void; onSaveTemplate: () => void }) {
+function Timeline({ date, blocks, config, overrides, daySettings, mode, onAdd, onEdit }: { date: string; blocks: Block[]; config: HitchConfig; overrides: HitchOverride[]; daySettings?: DaySettings; mode: Mode; onAdd: () => void; onEdit: (block: Block) => void }) {
   const nightShift = daySettings?.nightShiftOverride ?? config.defaultNightShift;
   const direction = mode === 'transition' ? getTransitionDirection(date, config, overrides) : null;
   const transitionHour = transitionHourFor(date, config, overrides, daySettings);
@@ -367,18 +394,18 @@ function Timeline({ date, blocks, templates, config, overrides, daySettings, mod
   const timelineClass = mode === 'work' ? 'timeline-day-work' : mode === 'home' ? 'timeline-day-home' : `timeline-day-transition ${direction === 'start-work' ? 'timeline-day-transition-start' : ''}`;
   const hours = Array.from({ length: 9 }, (_, i) => i * 3);
   return <section className="mt-7 overflow-hidden rounded-2xl border border-white/[.1] bg-black/[.14]">
-     <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/[.08] px-4 py-3"><div className="flex items-center gap-2 text-xs text-muted-foreground"><span className="h-1.5 w-1.5 rounded-full bg-accent" /><span>24-hour view</span>{nightShift && <span className="rounded-full bg-accent/10 px-2 py-1 font-mono-app text-[9px] uppercase tracking-[.1em] text-[#efc166]">Night shift · noon to noon</span>}</div><div className="flex flex-wrap items-center gap-2"><TemplatePicker templates={templates} onUse={onUseTemplate} onEdit={onEditTemplate} onSave={onSaveTemplate} /><button type="button" onClick={onAdd} data-testid="button-add-block" className="flex items-center gap-1.5 rounded-lg bg-primary px-3 py-2 text-xs font-bold text-primary-foreground transition hover:brightness-110"><Plus size={15} />Add block</button></div></div>
+     <div className="flex flex-wrap items-center gap-2 border-b border-white/[.08] px-4 py-3 text-xs text-muted-foreground"><span className="h-1.5 w-1.5 rounded-full bg-accent" /><span>24-hour view</span>{nightShift && <span className="rounded-full bg-accent/10 px-2 py-1 font-mono-app text-[9px] uppercase tracking-[.1em] text-[#efc166]">Night shift · noon to noon</span>}</div>
     <div className={`relative flex min-h-[1480px] px-3 py-5 sm:px-5 ${timelineClass}`} style={timelineStyle}>
       <div className="w-14 shrink-0 sm:w-20">{hours.map((hour) => <div key={hour} className="h-[180px] -translate-y-2 font-mono-app text-[10px] text-muted-foreground">{hour === 0 || hour === 24 ? '12 AM' : hour === 12 ? '12 PM' : `${hour > 12 ? hour - 12 : hour} ${hour >= 12 ? 'PM' : 'AM'}`}</div>)}</div>
       <div className="timeline-grid relative h-[1440px] flex-1 border-l border-white/[.1]">
         {nightShift && <div className="pointer-events-none absolute inset-x-0 top-1/2 h-1/2 bg-accent/[.025]" />}
         {blocks.length === 0 && <div className="absolute inset-x-4 top-[25%] text-center"><div className="mx-auto mb-3 flex h-11 w-11 items-center justify-center rounded-2xl border border-white/[.1] bg-white/[.04] text-muted-foreground"><Sun size={19} /></div><p className="font-display text-sm font-semibold">A clear run ahead</p><button type="button" onClick={onAdd} data-testid="button-add-first-block" className="mt-4 text-xs font-bold text-primary hover:underline">Add your first block</button></div>}
-        {layoutBlocks(blocks).map(({ block, start, end, col, cols }) => {
+        {buildTimelineSegments(blocks).map(({ block, start, end, color, isOverlap, layer }, index) => {
           const duration = end - start;
           const compact = duration < 26;
-          const showTime = duration >= 44;
-          return <button type="button" key={block.id} onClick={() => onEdit(block)} data-testid={`card-block-${block.id}`} className={`event-card absolute z-10 overflow-hidden rounded-xl border border-white/20 text-left shadow-lg ${compact ? 'px-2 py-0' : 'px-3 py-1.5'}`} style={{ top: `${start}px`, height: `${Math.max(13, duration - 2)}px`, left: `calc(0.75rem + (100% - 1.5rem) * ${col / cols})`, width: `calc((100% - 1.5rem) / ${cols} - 3px)`, backgroundColor: `${block.color}dd`, borderLeft: `4px solid ${block.color}` }}>
-            <span className={`block truncate font-bold leading-tight text-white ${compact ? 'text-[10px]' : 'text-sm'}`}>{block.title}</span>{showTime && <span className="mt-0.5 block truncate font-mono-app text-[10px] text-white/75">{timeLabel(block.startTime)} — {timeLabel(block.endTime)}</span>}
+          const showTime = duration >= (isOverlap ? 26 : 44);
+          return <button type="button" key={`${block.id}-${start}-${end}-${index}`} onClick={() => onEdit(block)} aria-label={`${block.title}, ${timeLabel(block.startTime)} to ${timeLabel(block.endTime)}`} data-testid={`card-block-${block.id}`} className={`event-card absolute overflow-hidden text-left shadow-lg ${isOverlap ? 'rounded-sm border-y border-dashed border-white/70 px-2 py-0.5' : `rounded-xl border border-white/20 ${compact ? 'px-2 py-0' : 'px-3 py-1.5'}`}`} style={{ zIndex: 10 + layer, top: `${start}px`, height: `${Math.max(13, duration - 2)}px`, left: '0.75rem', width: 'calc(100% - 1.5rem)', backgroundColor: color, borderLeft: isOverlap ? undefined : `4px solid ${block.color}` }}>
+            <span className={`block truncate font-bold leading-tight text-white ${compact ? 'text-[10px]' : isOverlap ? 'text-xs' : 'text-sm'}`}>{isOverlap ? '+ ' : ''}{block.title}{isOverlap && showTime ? ` · ${timeLabel(block.startTime)}–${timeLabel(block.endTime)}` : ''}</span>{!isOverlap && showTime && <span className="mt-0.5 block truncate font-mono-app text-[10px] text-white/75">{timeLabel(block.startTime)} — {timeLabel(block.endTime)}</span>}
           </button>;
         })}
       </div>
@@ -416,41 +443,238 @@ function TemplateEditModal({ template, returnFocus, onClose, onSave, onDelete }:
   return <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}><DialogContent onCloseAutoFocus={(event) => { event.preventDefault(); window.setTimeout(() => returnFocus?.focus(), 0); }} className="modal-panel w-[calc(100%-1.5rem)] max-w-md rounded-[1.5rem] border-white/[.12] bg-[hsl(221_22%_13%)] p-5 shadow-2xl sm:p-7"><form onSubmit={submit} data-testid="form-edit-template"><div className="mb-6"><p className="font-mono-app text-[10px] uppercase tracking-[.2em] text-primary">{kindLabel}</p><DialogTitle className="mt-2 font-display text-2xl font-bold">Edit template</DialogTitle><DialogDescription className="mt-2 text-xs text-muted-foreground">{template.blocks.length} {template.kind === 'block' ? 'block' : 'blocks'} · Change its name or repeat settings.</DialogDescription></div><label className="mb-4 block"><span className="mb-2 block text-xs font-semibold text-muted-foreground">Template name</span><input autoFocus required value={name} onChange={(event) => setName(event.target.value)} data-testid="input-edit-template-name" className="w-full rounded-xl border border-white/[.12] bg-black/[.16] px-3 py-3 text-sm outline-none focus:border-primary/70" /></label><div className="mb-4 grid grid-cols-2 gap-3"><label><span className="mb-2 block text-xs font-semibold text-muted-foreground">Repeat</span><select value={cadence} onChange={(event) => setCadence(event.target.value as TemplateCadence)} data-testid="select-edit-template-cadence" className="w-full rounded-xl border border-white/[.12] bg-black/[.16] px-2 py-3 text-xs outline-none focus:border-primary/70"><option value="one-time">One-time</option><option value="daily">Daily</option><option value="weekly">Weekly</option><option value="biweekly">Every 2 weeks</option></select></label><label><span className="mb-2 block text-xs font-semibold text-muted-foreground">Start date</span><input type="date" value={startDate} onChange={(event) => setStartDate(event.target.value)} data-testid="input-edit-template-start-date" className="w-full rounded-xl border border-white/[.12] bg-black/[.16] px-2 py-3 text-xs outline-none focus:border-primary/70" /></label></div><button type="button" onClick={() => setEnabled(!enabled)} data-testid="button-toggle-edit-template" className="mb-6 flex w-full items-center justify-between rounded-xl border border-white/[.1] bg-white/[.035] px-3 py-3 text-left text-xs"><span>Template status</span><span className={enabled ? 'font-bold text-accent' : 'text-muted-foreground'}>{enabled ? 'Active' : 'Disabled'}</span></button><div className="flex gap-2"><button type="button" onClick={() => { if (window.confirm(`Remove ${template.name}?`)) onDelete(); }} data-testid="button-remove-template" className="rounded-xl border border-primary/30 px-4 py-3 text-xs font-bold text-[#ef927e] hover:bg-primary/10">Remove</button><button type="submit" data-testid="button-save-template-edits" className="flex-1 rounded-xl bg-secondary px-4 py-3 text-xs font-bold text-secondary-foreground hover:brightness-110">Save changes</button></div></form></DialogContent></Dialog>;
 }
 
-function TemplatePicker({ templates, onUse, onEdit, onSave }: { templates: Template[]; onUse: (template: Template) => void; onEdit: (template: Template, trigger: HTMLButtonElement) => void; onSave: () => void }) {
-  const [selectedId, setSelectedId] = useState('');
-  const [menuOpen, setMenuOpen] = useState(false);
-  const menuTriggerRef = useRef<HTMLButtonElement>(null);
-  useEffect(() => { if (selectedId && !templates.some((template) => template.id === selectedId)) setSelectedId(''); }, [templates, selectedId]);
-  const selected = templates.find((template) => template.id === selectedId);
-  const cadenceLabel = (cadence: TemplateCadence = 'one-time') => cadence === 'daily' ? 'Daily' : cadence === 'weekly' ? 'Weekly' : cadence === 'biweekly' ? 'Every 2 weeks' : 'One-time';
-  return <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}><DropdownMenuTrigger asChild><button ref={menuTriggerRef} type="button" data-testid="button-day-templates" className="flex h-8 max-w-[190px] items-center gap-1.5 rounded-lg border border-white/[.12] bg-black/[.16] px-2.5 text-[10px] font-bold text-muted-foreground hover:bg-white/[.07] hover:text-foreground"><Copy size={13} /><span className="truncate">{selected?.name ?? 'Day templates'}</span><ChevronDown size={12} className="shrink-0" /></button></DropdownMenuTrigger><DropdownMenuContent align="end" className="z-[60] max-h-72 w-72 overflow-y-auto border-white/[.12] bg-[hsl(221_22%_13%/.98)] p-1.5 text-foreground shadow-2xl data-[state=closed]:hidden" data-testid="day-template-menu"><DropdownMenuLabel className="font-mono-app text-[9px] uppercase tracking-[.13em] text-muted-foreground">Day templates</DropdownMenuLabel>{templates.length === 0 ? <DropdownMenuItem disabled className="text-xs">No saved day templates yet</DropdownMenuItem> : templates.map((template) => <div key={template.id} className="flex items-center gap-1"><DropdownMenuItem onSelect={(event) => { event.preventDefault(); setSelectedId(template.id); }} data-testid={`button-select-day-template-${template.id}`} className="min-w-0 flex-1 items-center gap-2 text-xs focus:bg-white/[.08] focus:text-foreground"><span className="flex h-4 w-4 shrink-0 items-center justify-center">{selectedId === template.id && <Check size={12} className="text-accent" />}</span><span className="min-w-0 flex-1 truncate">{template.name}</span><span className="shrink-0 text-[9px] text-muted-foreground">{cadenceLabel(template.cadence)}</span></DropdownMenuItem><button type="button" onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.preventDefault(); event.stopPropagation(); const trigger = menuTriggerRef.current; if (!trigger) return; setMenuOpen(false); window.setTimeout(() => onEdit(template, trigger), 0); }} aria-label={`Edit ${template.name}`} data-testid={`button-edit-day-template-${template.id}`} className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-white/[.08] hover:text-foreground"><Pencil size={12} /></button></div>)}<div className="mt-1 border-t border-white/[.08] pt-1"><button type="button" disabled={!selected} onClick={() => { if (selected) { setMenuOpen(false); onUse(selected); } }} data-testid="button-use-day-template" className="w-full rounded-lg bg-secondary px-3 py-2 text-left text-[10px] font-bold text-secondary-foreground hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"><Check size={13} className="mr-1.5 inline" />Use selected template</button><button type="button" onClick={() => { setMenuOpen(false); onSave(); }} data-testid="button-save-day-template" className="mt-1 w-full rounded-lg border border-white/[.1] px-3 py-2 text-left text-[10px] font-bold text-muted-foreground hover:bg-white/[.07] hover:text-foreground"><Copy size={13} className="mr-1.5 inline" />Save current day as template</button></div></DropdownMenuContent></DropdownMenu>;
+function MonthAddPicker({ initialDate, onContinue }: { initialDate: string; onContinue: (date: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const [date, setDate] = useState(initialDate);
+  useEffect(() => { setDate(initialDate); }, [initialDate]);
+  return <div className="relative">
+    <button type="button" onClick={() => setOpen(!open)} aria-label="Add a block" aria-expanded={open} data-testid="button-calendar-add" className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary text-primary-foreground transition hover:brightness-110"><Plus size={18} /></button>
+    {open && <div className="absolute right-0 top-full z-30 mt-2 w-[min(18rem,calc(100vw-2rem))] rounded-xl border border-white/[.12] bg-[hsl(221_22%_13%/.98)] p-4 shadow-2xl backdrop-blur-xl" data-testid="calendar-add-date-picker">
+      <label className="block"><span className="mb-2 block text-xs font-semibold text-muted-foreground">Add to date</span><input type="date" value={date} onChange={(event) => setDate(event.target.value)} data-testid="input-calendar-add-date" className="w-full rounded-lg border border-white/[.12] bg-black/[.2] px-3 py-2.5 text-sm outline-none focus:border-primary/70" /></label>
+      <button type="button" disabled={!date} onClick={() => { setOpen(false); onContinue(date); }} data-testid="button-calendar-add-continue" className="mt-3 w-full rounded-lg bg-primary px-3 py-2.5 text-xs font-bold text-primary-foreground transition hover:brightness-110 disabled:opacity-40">Continue</button>
+    </div>}
+  </div>;
 }
 
-function TodayPage({ config, blocks, templates, overrides, daySettings, onCreateBlock, onUpdateBlock, onDeleteBlock, onSetDaySettings, onResetDay, onClearDay, onSaveTemplate, onUseTemplate, onUpdateTemplate, onDeleteTemplate }: { config: HitchConfig; blocks: Block[]; templates: Template[]; overrides: HitchOverride[]; daySettings: Record<string, DaySettings>; onCreateBlock: (date: string, data: BlockContent, options: BlockSaveOptions) => void; onUpdateBlock: (id: string, data: BlockContent) => void; onDeleteBlock: (id: string) => void; onSetDaySettings: (date: string, settings: DaySettings) => void; onResetDay: (date: string) => void; onClearDay: (date: string) => void; onSaveTemplate: (date: string, name: string, cadence: TemplateCadence, startDate: string, targetId?: string, selectedIds?: string[]) => void; onUseTemplate: (date: string, template: Template) => void; onUpdateTemplate: (id: string, changes: { name: string; cadence: TemplateCadence; startDate: string; enabled: boolean }) => void; onDeleteTemplate: (id: string) => void }) {
-  const [location] = useLocation(); const search = useSearch(); const queryDate = new URLSearchParams(search).get('date'); const [date, setDate] = useState(queryDate ?? todayString()); const [editing, setEditing] = useState<Block>(); const [editingTemplate, setEditingTemplate] = useState<Template>(); const [templateEditorTrigger, setTemplateEditorTrigger] = useState<HTMLButtonElement | null>(null);
-  const [adding, setAdding] = useState(false); const [settingsOpen, setSettingsOpen] = useState(false); const [savingTemplate, setSavingTemplate] = useState(false);
-   const mode = resolveMode(date, config, overrides); const dateBlocks = blocksForDate(date, blocks, templates, config, overrides, daySettings); const dayTemplates = templates.filter((template) => template.kind !== 'block'); const blockTemplates = templates.filter((template) => template.kind === 'block');
-  const settings = daySettings[date]; const runningTemplate = winningDayTemplate(date, templates, config, overrides, settings); const isToday = date === todayString(); const nightShift = settings?.nightShiftOverride ?? config.defaultNightShift;
-  useEffect(() => { setDate(queryDate ?? todayString()); }, [location, queryDate, search]);
+function DayActionsMenu({ date, mode, blockCount, config, overrides, settings, runningTemplate, dayTemplates, onSetDaySettings, onResetDay, onClearDay, onSaveTemplate, onUseTemplate, onEditTemplate }: { date: string; mode: Mode; blockCount: number; config: HitchConfig; overrides: HitchOverride[]; settings?: DaySettings; runningTemplate: Template | null; dayTemplates: Template[]; onSetDaySettings: (date: string, settings: DaySettings) => void; onResetDay: (date: string) => void; onClearDay: (date: string) => void; onSaveTemplate: () => void; onUseTemplate: (template: Template) => void; onEditTemplate: (template: Template, trigger: HTMLButtonElement) => void }) {
+  const [open, setOpen] = useState(false);
+  const [showTemplates, setShowTemplates] = useState(false);
+  const nightShift = settings?.nightShiftOverride ?? config.defaultNightShift;
+  const close = () => { setOpen(false); setShowTemplates(false); };
+  const cadenceLabel = (template: Template) => template.enabled === false
+    ? 'Disabled'
+    : template.cadence === 'daily'
+      ? 'Daily'
+      : template.cadence === 'weekly'
+        ? 'Weekly'
+        : template.cadence === 'biweekly'
+          ? 'Every 2 weeks'
+          : 'One-time';
+  return <div className="relative">
+    <button type="button" aria-label="More day actions" aria-expanded={open} onClick={() => { setOpen(!open); if (open) setShowTemplates(false); }} data-testid="button-open-day-settings" className="flex h-10 w-10 items-center justify-center rounded-lg border border-white/[.12] bg-black/[.14] text-muted-foreground transition hover:bg-white/[.08] hover:text-foreground"><MoreHorizontal size={19} /></button>
+    {open && <div className="absolute right-0 top-full z-30 mt-2 w-[min(18rem,calc(100vw-2rem))] rounded-xl border border-white/[.12] bg-[hsl(221_22%_13%/.98)] p-4 shadow-2xl backdrop-blur-xl" data-testid="day-settings-popover">
+      {showTemplates ? <>
+        <div className="mb-3 flex items-center justify-between gap-2"><button type="button" onClick={() => setShowTemplates(false)} aria-label="Back to day actions" data-testid="button-back-to-day-actions" className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground hover:bg-white/[.08] hover:text-foreground"><ChevronLeft size={17} /></button><span className="min-w-0 flex-1 font-display text-sm font-bold">Day templates</span><span className="font-mono-app text-[9px] text-muted-foreground">{dayTemplates.length} saved</span></div>
+        {dayTemplates.length === 0 ? <div className="rounded-lg border border-dashed border-white/[.12] px-3 py-5 text-center text-xs text-muted-foreground">No saved day templates yet.</div> : <div className="max-h-72 space-y-1 overflow-y-auto" data-testid="day-template-list">{dayTemplates.map((template) => <div key={template.id} className="flex items-center gap-1 rounded-lg border border-white/[.08] bg-white/[.025] p-1">
+          <button type="button" onClick={() => { onUseTemplate(template); close(); }} data-testid={`button-use-day-template-${template.id}`} className="min-w-0 flex-1 rounded-md px-2 py-2 text-left hover:bg-white/[.06]"><span className="block truncate text-xs font-semibold">{template.name}</span><span className="mt-0.5 block font-mono-app text-[8px] text-muted-foreground">{cadenceLabel(template)} · {template.blocks.length} {template.blocks.length === 1 ? 'block' : 'blocks'}</span></button>
+          <button type="button" onClick={(event) => { const trigger = event.currentTarget; close(); window.setTimeout(() => onEditTemplate(template, trigger), 0); }} aria-label={`Edit ${template.name}`} data-testid={`button-edit-day-template-${template.id}`} className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-white/[.08] hover:text-foreground"><Pencil size={14} /></button>
+        </div>)}</div>}
+      </> : <>
+        <div className="mb-3 flex items-center justify-between"><span className="font-display text-sm font-bold">Day actions</span><span className="font-mono-app text-[9px] text-muted-foreground">{blockCount} {blockCount === 1 ? 'block' : 'blocks'}</span></div>
+        <div className="mb-3 grid gap-2"><button type="button" disabled={blockCount === 0} onClick={() => { close(); onSaveTemplate(); }} data-testid="button-save-current-day" className="flex w-full items-center gap-2 rounded-lg bg-secondary px-3 py-2.5 text-left text-xs font-bold text-secondary-foreground transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"><Save size={14} />Save day as template</button><button type="button" onClick={() => setShowTemplates(true)} data-testid="button-view-day-templates" className="flex w-full items-center justify-between rounded-lg border border-white/[.1] bg-white/[.035] px-3 py-2 text-left text-[11px] font-semibold text-muted-foreground transition hover:bg-white/[.07] hover:text-foreground"><span className="flex items-center gap-2"><Copy size={13} />View templates</span><span>{dayTemplates.length}</span></button></div>
+        <div className="mb-3 rounded-lg border border-white/[.1] bg-black/[.18] px-3 py-2"><span className="block font-mono-app text-[9px] uppercase text-muted-foreground">This day</span><span data-testid="text-day-source" className="mt-1 block text-[11px] font-semibold">{settings?.detached ? 'Customized — no template' : runningTemplate ? runningTemplate.name : 'No template applies'}</span></div>
+        {mode === 'transition' && <label className="mb-3 block"><span className="mb-2 block text-[11px] font-semibold text-muted-foreground">Transition hour</span><select value={settings?.transitionHour ?? transitionHourFor(date, config, overrides)} onChange={(event) => onSetDaySettings(date, { ...settings, transitionHour: Number(event.target.value), nightShiftOverride: settings?.nightShiftOverride ?? null })} data-testid="select-transition-hour" className="w-full rounded-lg border border-white/[.1] bg-black/[.2] px-2 py-2 font-mono-app text-[10px] text-foreground outline-none focus:border-primary/70">{Array.from({ length: 24 }, (_, hour) => <option key={hour} value={hour}>{timeLabel(`${String(hour).padStart(2, '0')}:00`)}</option>)}</select></label>}
+        <button type="button" onClick={() => onSetDaySettings(date, { ...settings, nightShiftOverride: !nightShift })} data-testid="button-toggle-date-night" className="flex w-full items-center justify-between rounded-lg border border-white/[.1] bg-white/[.035] px-3 py-2.5 text-left text-xs text-muted-foreground transition hover:bg-white/[.07]"><span className="flex items-center gap-2"><Moon size={14} className={nightShift ? 'text-accent' : ''} />Night shift</span><span className={nightShift ? 'text-accent' : 'text-muted-foreground'}>{nightShift ? 'On' : 'Off'}</span></button>
+        <button type="button" onClick={() => { if (window.confirm('Remove every block from this day?')) { onClearDay(date); close(); } }} data-testid="button-clear-day" className="mt-3 flex w-full items-center gap-2 rounded-lg border border-white/[.1] bg-white/[.035] px-3 py-2.5 text-left text-xs text-[#ee8f7e] transition hover:bg-primary/10"><Trash2 size={14} />Clear this day</button>
+        <button type="button" onClick={() => { onResetDay(date); close(); }} data-testid="button-resync-day" className="mt-2 flex w-full items-center gap-2 rounded-lg border border-white/[.1] bg-white/[.035] px-3 py-2.5 text-left text-xs text-muted-foreground transition hover:bg-white/[.07] hover:text-foreground"><Copy size={14} />Re-sync to templates</button>
+      </>}
+    </div>}
+  </div>;
+}
+
+function phaseSummary(date: string, config: HitchConfig) {
+  const total = config.workPhaseLength + config.homePhaseLength;
+  const offset = cycleIndex(diffDays(config.cycleStartDate, date), total);
+  const work = offset < config.workPhaseLength;
+  return `${work ? 'Work' : 'Home'} · day ${work ? offset + 1 : offset - config.workPhaseLength + 1} of ${work ? config.workPhaseLength : config.homePhaseLength}`;
+}
+
+type DayPageProps = {
+  config: HitchConfig;
+  blocks: Block[];
+  templates: Template[];
+  overrides: HitchOverride[];
+  daySettings: Record<string, DaySettings>;
+  onCreateBlock: (date: string, data: BlockContent, options: BlockSaveOptions) => void;
+  onUpdateBlock: (id: string, data: BlockContent) => void;
+  onDeleteBlock: (id: string) => void;
+  onSetDaySettings: (date: string, settings: DaySettings) => void;
+  onResetDay: (date: string) => void;
+  onClearDay: (date: string) => void;
+  onSaveTemplate: (date: string, name: string, cadence: TemplateCadence, startDate: string, targetId?: string, selectedIds?: string[]) => void;
+  onUseTemplate: (date: string, template: Template) => void;
+  onUpdateTemplate: (id: string, changes: { name: string; cadence: TemplateCadence; startDate: string; enabled: boolean }) => void;
+  onDeleteTemplate: (id: string) => void;
+};
+
+function DayPage({ config, blocks, templates, overrides, daySettings, onCreateBlock, onUpdateBlock, onDeleteBlock, onSetDaySettings, onResetDay, onClearDay, onSaveTemplate, onUseTemplate, onUpdateTemplate, onDeleteTemplate }: DayPageProps) {
+  const [, navigate] = useLocation();
+  const search = useSearch();
+  const params = new URLSearchParams(search);
+  const date = params.get('date') ?? todayString();
+  const [editing, setEditing] = useState<Block>();
+  const [editingTemplate, setEditingTemplate] = useState<Template>();
+  const [templateEditorTrigger, setTemplateEditorTrigger] = useState<HTMLButtonElement | null>(null);
+  const [adding, setAdding] = useState(false);
+  const [savingTemplate, setSavingTemplate] = useState(false);
+  const mode = resolveMode(date, config, overrides);
+  const dateBlocks = blocksForDate(date, blocks, templates, config, overrides, daySettings);
+  const dayTemplates = templates.filter((template) => template.kind !== 'block');
+  const blockTemplates = templates.filter((template) => template.kind === 'block');
+  const settings = daySettings[date];
+  const runningTemplate = winningDayTemplate(date, templates, config, overrides, settings);
+  const dateLabel = parseDate(date).toLocaleDateString(undefined, { weekday: 'long', month: 'short', day: 'numeric' });
+  const backLabel = parseDate(date).toLocaleDateString(undefined, { month: 'long' });
+  const goToDate = (next: string) => navigate(`/?date=${next}`);
+
+  useEffect(() => {
+    if (params.get('add') !== '1') return;
+    setAdding(true);
+    navigate(`/?date=${date}`, { replace: true });
+  }, [date, navigate, search]);
+
   return <AppShell mode={mode}><div className="fade-in mx-auto max-w-[1040px]">
-    <div className="flex flex-col justify-between gap-5 border-b border-white/[.09] pb-7 sm:flex-row sm:items-end"><div><div className="mb-4 flex items-center gap-3"><PhaseBadge mode={mode} />{isToday && <span className="font-mono-app text-[10px] uppercase tracking-[.15em] text-muted-foreground">Live date</span>}</div><h1 data-testid="text-today-date" className="font-display text-[clamp(2.2rem,7vw,4.4rem)] font-bold leading-[.95] tracking-[-.07em]">{formatLongDate(date)}</h1></div><div className="flex items-center gap-2 self-end"><DatePicker date={date} onChange={setDate} /><div className="relative"><button type="button" aria-label="Open day settings" aria-expanded={settingsOpen} onClick={() => setSettingsOpen(!settingsOpen)} data-testid="button-open-day-settings" className="flex h-10 w-10 items-center justify-center rounded-xl border border-white/[.1] bg-white/[.045] text-muted-foreground transition hover:bg-white/[.08] hover:text-foreground"><Settings size={16} /></button>{settingsOpen && <div className="absolute right-0 top-full z-30 mt-2 w-64 rounded-2xl border border-white/[.12] bg-[hsl(221_22%_13%/.98)] p-4 shadow-2xl backdrop-blur-xl" data-testid="day-settings-popover"><div className="mb-4 flex items-center justify-between"><span className="font-display text-sm font-bold">Day settings</span><span className="font-mono-app text-[9px] text-muted-foreground">{dateBlocks.length} {dateBlocks.length === 1 ? 'block' : 'blocks'}</span></div>{mode === 'transition' && <label className="block"><span className="mb-2 block text-[11px] font-semibold text-muted-foreground">Transition hour</span><select value={settings?.transitionHour ?? transitionHourFor(date, config, overrides)} onChange={(event) => onSetDaySettings(date, { transitionHour: Number(event.target.value), nightShiftOverride: settings?.nightShiftOverride ?? null })} data-testid="select-transition-hour" className="w-full rounded-lg border border-white/[.1] bg-black/[.2] px-2 py-2 font-mono-app text-[10px] text-foreground outline-none focus:border-primary/70">{Array.from({ length: 24 }, (_, hour) => <option key={hour} value={hour}>{timeLabel(`${String(hour).padStart(2, '0')}:00`)}</option>)}</select></label>}<div className="mb-3 rounded-lg border border-white/[.1] bg-black/[.18] px-3 py-2"><span className="block font-mono-app text-[9px] uppercase tracking-[.12em] text-muted-foreground">This day</span><span data-testid="text-day-source" className="mt-1 block text-[11px] font-semibold">{settings?.detached ? 'Customized — no template' : runningTemplate ? runningTemplate.name : 'No template applies'}</span></div><button type="button" onClick={() => onSetDaySettings(date, { transitionHour: settings?.transitionHour, nightShiftOverride: !nightShift })} data-testid="button-toggle-date-night" className="mt-3 flex w-full items-center justify-between rounded-lg border border-white/[.1] bg-white/[.035] px-3 py-2.5 text-left text-xs text-muted-foreground transition hover:bg-white/[.07]"><span className="flex items-center gap-2"><Moon size={14} className={nightShift ? 'text-accent' : ''} />Night shift</span><span className={nightShift ? 'text-accent' : 'text-muted-foreground'}>{nightShift ? 'On' : 'Off'}</span></button><button type="button" onClick={() => { if (window.confirm('Remove every block from this day?')) { onClearDay(date); setSettingsOpen(false); } }} data-testid="button-clear-day" className="mt-3 flex w-full items-center gap-2 rounded-lg border border-white/[.1] bg-white/[.035] px-3 py-2.5 text-left text-xs text-[#ee8f7e] transition hover:bg-primary/10"><Trash2 size={14} />Clear this day</button><button type="button" onClick={() => { onResetDay(date); setSettingsOpen(false); }} data-testid="button-resync-day" className="mt-2 flex w-full items-center gap-2 rounded-lg border border-white/[.1] bg-white/[.035] px-3 py-2.5 text-left text-xs text-muted-foreground transition hover:bg-white/[.07] hover:text-foreground"><Copy size={14} />Re-sync to templates</button><p className="mt-2 text-[10px] leading-snug text-muted-foreground">Clearing empties the day so you can build it yourself. Re-syncing hands it back to whichever template applies.</p></div>}</div></div></div>
-      <Timeline date={date} blocks={dateBlocks} templates={dayTemplates} config={config} overrides={overrides} daySettings={settings} mode={mode} onAdd={() => setAdding(true)} onEdit={setEditing} onUseTemplate={(template) => onUseTemplate(date, template)} onEditTemplate={(template, trigger) => { setTemplateEditorTrigger(trigger); setEditingTemplate(template); }} onSaveTemplate={() => setSavingTemplate(true)} />
-      {adding && <BlockModal date={date} templates={blockTemplates} onClose={() => setAdding(false)} onSave={(data, options) => { onCreateBlock(date, data, options); setAdding(false); }} onEditTemplate={(template, trigger) => { setTemplateEditorTrigger(trigger); setEditingTemplate(template); }} />}
-      {editing && <BlockModal block={editing} date={date} templates={blockTemplates} onClose={() => setEditing(undefined)} onSave={(data) => { onUpdateBlock(editing.id, data); setEditing(undefined); }} onDelete={() => { onDeleteBlock(editing.id); setEditing(undefined); }} onEditTemplate={(template, trigger) => { setTemplateEditorTrigger(trigger); setEditingTemplate(template); }} />}
-     {savingTemplate && <TemplateSaveModal date={date} dayBlocks={dateBlocks} dayTemplates={dayTemplates} onClose={() => setSavingTemplate(false)} onSave={(name, cadence, startDate, targetId, selectedIds) => { onSaveTemplate(date, name, cadence, startDate, targetId, selectedIds); setSavingTemplate(false); }} />}
-      {editingTemplate && <TemplateEditModal template={editingTemplate} returnFocus={templateEditorTrigger} onClose={() => setEditingTemplate(undefined)} onSave={(changes) => { onUpdateTemplate(editingTemplate.id, changes); setEditingTemplate(undefined); }} onDelete={() => { onDeleteTemplate(editingTemplate.id); setEditingTemplate(undefined); }} />}
+    <div className="border-b border-white/[.09] pb-5">
+      <div className="flex items-center justify-between gap-3">
+        <button type="button" onClick={() => navigate(`/calendar?month=${date.slice(0, 7)}`)} data-testid="button-back-to-month" className="flex min-w-0 items-center gap-1 rounded-lg px-1 py-2 text-sm font-semibold text-muted-foreground transition hover:text-foreground"><ChevronLeft size={18} /><span className="truncate">{backLabel}</span></button>
+        <div className="flex items-center gap-2">
+          <button type="button" onClick={() => setAdding(true)} aria-label="Add a block" data-testid="button-add-block" className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary text-primary-foreground transition hover:brightness-110"><Plus size={18} /></button>
+          <DayActionsMenu date={date} mode={mode} blockCount={dateBlocks.length} config={config} overrides={overrides} settings={settings} runningTemplate={runningTemplate} dayTemplates={dayTemplates} onSetDaySettings={onSetDaySettings} onResetDay={onResetDay} onClearDay={onClearDay} onSaveTemplate={() => setSavingTemplate(true)} onUseTemplate={(template) => onUseTemplate(date, template)} onEditTemplate={(template, trigger) => { setTemplateEditorTrigger(trigger); setEditingTemplate(template); }} />
+        </div>
+      </div>
+      <ViewTabs current="day" date={date} />
+    </div>
+    <div className="flex items-center gap-2 border-b border-white/[.09] py-6 sm:gap-4">
+      <button type="button" onClick={() => goToDate(addDays(date, -1))} aria-label="Previous day" data-testid="button-previous-day" className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border border-white/[.1] bg-black/[.12] text-muted-foreground transition hover:bg-white/[.08] hover:text-foreground"><ChevronLeft size={18} /></button>
+      <div className="min-w-0 flex-1 text-center"><h1 data-testid="text-today-date" className="font-display text-[clamp(1.55rem,6vw,2.65rem)] font-bold leading-tight">{dateLabel}</h1><p className="mt-1 font-mono-app text-[10px] uppercase text-muted-foreground">{phaseSummary(date, config)}</p></div>
+      <button type="button" onClick={() => goToDate(addDays(date, 1))} aria-label="Next day" data-testid="button-next-day" className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border border-white/[.1] bg-black/[.12] text-muted-foreground transition hover:bg-white/[.08] hover:text-foreground"><ChevronRight size={18} /></button>
+    </div>
+    <Timeline date={date} blocks={dateBlocks} config={config} overrides={overrides} daySettings={settings} mode={mode} onAdd={() => setAdding(true)} onEdit={setEditing} />
+    {adding && <BlockModal date={date} templates={blockTemplates} onClose={() => setAdding(false)} onSave={(data, options) => { onCreateBlock(date, data, options); setAdding(false); }} onEditTemplate={(template, trigger) => { setTemplateEditorTrigger(trigger); setEditingTemplate(template); }} />}
+    {editing && <BlockModal block={editing} date={date} templates={blockTemplates} onClose={() => setEditing(undefined)} onSave={(data) => { onUpdateBlock(editing.id, data); setEditing(undefined); }} onDelete={() => { onDeleteBlock(editing.id); setEditing(undefined); }} onEditTemplate={(template, trigger) => { setTemplateEditorTrigger(trigger); setEditingTemplate(template); }} />}
+    {savingTemplate && <TemplateSaveModal date={date} dayBlocks={dateBlocks} dayTemplates={dayTemplates} onClose={() => setSavingTemplate(false)} onSave={(name, cadence, startDate, targetId, selectedIds) => { onSaveTemplate(date, name, cadence, startDate, targetId, selectedIds); setSavingTemplate(false); }} />}
+    {editingTemplate && <TemplateEditModal template={editingTemplate} returnFocus={templateEditorTrigger} onClose={() => setEditingTemplate(undefined)} onSave={(changes) => { onUpdateTemplate(editingTemplate.id, changes); setEditingTemplate(undefined); }} onDelete={() => { onDeleteTemplate(editingTemplate.id); setEditingTemplate(undefined); }} />}
   </div></AppShell>;
 }
 
-function CalendarPage({ config, blocks, templates, overrides, daySettings }: { config: HitchConfig; blocks: Block[]; templates: Template[]; overrides: HitchOverride[]; daySettings: Record<string, DaySettings> }) {
-  const [, navigate] = useLocation(); const [month, setMonth] = useState(() => { const d = new Date(); return new Date(d.getFullYear(), d.getMonth(), 1); });
-  const start = new Date(month.getFullYear(), month.getMonth(), 1); const first = (start.getDay() + 6) % 7; const days = new Date(month.getFullYear(), month.getMonth() + 1, 0).getDate();
-  const cells = Array.from({ length: Math.ceil((first + days) / 7) * 7 }, (_, i) => { const n = i - first + 1; return n > 0 && n <= days ? toDateString(new Date(month.getFullYear(), month.getMonth(), n)) : null; });
+function MonthPage({ config, blocks, templates, overrides, daySettings }: { config: HitchConfig; blocks: Block[]; templates: Template[]; overrides: HitchOverride[]; daySettings: Record<string, DaySettings> }) {
+  const [, navigate] = useLocation();
+  const search = useSearch();
+  const requestedMonth = new URLSearchParams(search).get('month');
+  const initialMonth = /^\d{4}-\d{2}$/.test(requestedMonth ?? '') ? parseDate(`${requestedMonth}-01`) : new Date();
+  const [month, setMonth] = useState(() => new Date(initialMonth.getFullYear(), initialMonth.getMonth(), 1));
+  const start = new Date(month.getFullYear(), month.getMonth(), 1);
+  const first = (start.getDay() + 6) % 7;
+  const days = new Date(month.getFullYear(), month.getMonth() + 1, 0).getDate();
+  const cells = Array.from({ length: Math.ceil((first + days) / 7) * 7 }, (_, index) => {
+    const day = index - first + 1;
+    return day > 0 && day <= days ? toDateString(new Date(month.getFullYear(), month.getMonth(), day)) : null;
+  });
   const todayMode = resolveMode(todayString(), config, overrides);
+  const defaultAddDate = todayString().slice(0, 7) === toDateString(start).slice(0, 7) ? todayString() : toDateString(start);
+  const moveMonth = (next: Date) => {
+    const normalized = new Date(next.getFullYear(), next.getMonth(), 1);
+    setMonth(normalized);
+    navigate(`/calendar?month=${toDateString(normalized).slice(0, 7)}`, { replace: true });
+  };
+
+  useEffect(() => {
+    if (!/^\d{4}-\d{2}$/.test(requestedMonth ?? '')) return;
+    const requested = parseDate(`${requestedMonth}-01`);
+    if (requested.getFullYear() !== month.getFullYear() || requested.getMonth() !== month.getMonth()) setMonth(new Date(requested.getFullYear(), requested.getMonth(), 1));
+  }, [requestedMonth]);
+
   return <AppShell mode={todayMode}><div className="fade-in mx-auto max-w-[1100px]">
-    <div className="flex flex-col justify-between gap-4 border-b border-white/[.09] pb-7 sm:flex-row sm:items-end"><div><p className="font-mono-app text-[10px] uppercase tracking-[.2em] text-muted-foreground">The wider view</p><h1 className="mt-3 font-display text-4xl font-bold tracking-[-.06em] sm:text-5xl">Calendar<span className="text-primary">.</span></h1></div><div className="flex items-center gap-2"><button type="button" onClick={() => setMonth(new Date())} data-testid="button-calendar-today" className="rounded-xl border border-white/[.1] px-3 py-2 text-xs font-semibold text-muted-foreground hover:bg-white/[.06] hover:text-foreground">This month</button><div className="flex rounded-xl border border-white/[.1] bg-white/[.04] p-1"><button type="button" onClick={() => setMonth(new Date(month.getFullYear(), month.getMonth() - 1, 1))} aria-label="Previous month" data-testid="button-previous-month" className="rounded-lg p-2 text-muted-foreground hover:bg-white/[.08] hover:text-foreground"><ChevronLeft size={16} /></button><button type="button" onClick={() => setMonth(new Date(month.getFullYear(), month.getMonth() + 1, 1))} aria-label="Next month" data-testid="button-next-month" className="rounded-lg p-2 text-muted-foreground hover:bg-white/[.08] hover:text-foreground"><ChevronRight size={16} /></button></div></div></div>
-    <div className="mt-8 flex items-center justify-between"><h2 data-testid="text-calendar-month" className="font-display text-2xl font-bold tracking-[-.04em]">{monthTitle(month)}</h2><div className="flex gap-3 font-mono-app text-[9px] uppercase tracking-[.12em] text-muted-foreground"><span className="flex items-center gap-1.5"><i className="h-2 w-2 rounded-full bg-primary" />Work</span><span className="flex items-center gap-1.5"><i className="h-2 w-2 rounded-full bg-secondary" />Home</span><span className="flex items-center gap-1.5"><i className="h-2 w-2 rounded-full bg-accent" />Transition</span></div></div>
-     <div className="mt-4 overflow-hidden rounded-2xl border border-white/[.1] bg-black/[.12]"><div className="grid grid-cols-7 border-b border-white/[.1]">{['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map((day) => <div key={day} className="px-2 py-3 text-center font-mono-app text-[9px] uppercase tracking-[.14em] text-muted-foreground sm:px-4 sm:text-left">{day}</div>)}</div><div className="grid grid-cols-7">{cells.map((date, index) => { const cellBlocks = date ? blocksForDate(date, blocks, templates, config, overrides, daySettings) : []; const mode = date ? resolveMode(date, config, overrides) : 'home'; const direction = date && mode === 'transition' ? getTransitionDirection(date, config, overrides) : null; const today = date === todayString(); return <button type="button" disabled={!date} key={`${date}-${index}`} onClick={() => date && navigate(`/?date=${date}`)} data-testid={date ? `calendar-day-${date}` : `calendar-empty-${index}`} style={date && mode === 'transition' ? transitionStyleFor(date, config, overrides) : undefined} className={`relative min-h-[96px] border-b border-r border-white/[.07] p-2 text-left transition last:border-r-0 sm:min-h-[130px] sm:p-3 ${date ? mode === 'work' ? 'mode-cell-work hover:brightness-110' : mode === 'home' ? 'mode-cell-home hover:brightness-110' : `mode-cell-transition ${direction === 'start-work' ? 'mode-cell-transition-start' : ''} hover:brightness-110` : 'bg-white/[.012]'} ${today ? 'ring-1 ring-inset ring-foreground/80' : ''}`}>{date && <><div className="flex items-center justify-between"><span className={`font-display text-sm font-bold ${today ? 'flex h-7 w-7 items-center justify-center rounded-full bg-primary text-primary-foreground' : ''}`}>{parseDate(date).getDate()}</span>{cellBlocks.length > 0 && <span className="font-mono-app text-[9px] text-foreground/75">{cellBlocks.length}</span>}</div><div className={`absolute bottom-0 left-0 right-0 h-0.5 ${mode === 'work' ? 'bg-[#f0a38e]' : mode === 'home' ? 'bg-[#8fd8c3]' : 'bg-accent'}`} />{cellBlocks.slice(0, 2).map((block) => <div key={block.id} className="mt-2 truncate rounded-md px-1.5 py-1 text-[10px] font-semibold text-white/90" style={{ backgroundColor: `${block.color}bb` }}>{block.title}</div>)}</>}</button>; })}</div></div>
+    <div className="border-b border-white/[.09] pb-5">
+      <div className="flex flex-col gap-3 min-[360px]:flex-row min-[360px]:items-center min-[360px]:justify-between">
+        <div className="min-w-0"><p className="font-mono-app text-[9px] uppercase text-muted-foreground">Calendar</p><h1 data-testid="text-calendar-month" className="mt-1 font-display text-3xl font-bold min-[360px]:truncate sm:text-4xl">{monthTitle(month)}</h1></div>
+        <div className="flex shrink-0 items-center gap-1.5 self-end min-[360px]:self-auto">
+          <button type="button" onClick={() => moveMonth(new Date())} data-testid="button-calendar-today" className="hidden rounded-lg border border-white/[.1] px-3 py-2 text-xs font-semibold text-muted-foreground hover:bg-white/[.06] hover:text-foreground sm:block">This month</button>
+          <button type="button" onClick={() => moveMonth(new Date(month.getFullYear(), month.getMonth() - 1, 1))} aria-label="Previous month" data-testid="button-previous-month" className="flex h-10 w-10 items-center justify-center rounded-lg border border-white/[.1] text-muted-foreground hover:bg-white/[.08] hover:text-foreground"><ChevronLeft size={17} /></button>
+          <button type="button" onClick={() => moveMonth(new Date(month.getFullYear(), month.getMonth() + 1, 1))} aria-label="Next month" data-testid="button-next-month" className="flex h-10 w-10 items-center justify-center rounded-lg border border-white/[.1] text-muted-foreground hover:bg-white/[.08] hover:text-foreground"><ChevronRight size={17} /></button>
+          <MonthAddPicker initialDate={defaultAddDate} onContinue={(date) => navigate(`/?date=${date}&add=1`)} />
+        </div>
+      </div>
+      <ViewTabs current="month" date={toDateString(start)} />
+    </div>
+    <div className="mt-5 flex items-center justify-end gap-3 font-mono-app text-[8px] uppercase text-muted-foreground sm:text-[9px]"><span className="flex items-center gap-1.5"><i className="h-2 w-2 rounded-full bg-primary" />Work</span><span className="flex items-center gap-1.5"><i className="h-2 w-2 rounded-full bg-secondary" />Home</span><span className="flex items-center gap-1.5"><i className="h-2 w-2 rounded-full bg-accent" />Transition</span></div>
+    <div className="mt-3 overflow-hidden rounded-lg border border-white/[.1] bg-black/[.12]">
+      <div className="grid grid-cols-7 border-b border-white/[.1]">{['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map((day) => <div key={day} className="px-1 py-2 text-center font-mono-app text-[8px] uppercase text-muted-foreground sm:px-3 sm:py-3 sm:text-left sm:text-[9px]">{day}</div>)}</div>
+      <div className="grid grid-cols-7">{cells.map((date, index) => {
+        const cellBlocks = date ? blocksForDate(date, blocks, templates, config, overrides, daySettings) : [];
+        const segments = computeBarSegments(cellBlocks);
+        const mode = date ? resolveMode(date, config, overrides) : 'home';
+        const direction = date && mode === 'transition' ? getTransitionDirection(date, config, overrides) : null;
+        const today = date === todayString();
+        const modeClass = mode === 'work' ? 'mode-cell-work' : mode === 'home' ? 'mode-cell-home' : `mode-cell-transition ${direction === 'start-work' ? 'mode-cell-transition-start' : ''}`;
+        return <button type="button" disabled={!date} key={`${date}-${index}`} onClick={() => date && navigate(`/?date=${date}`)} aria-label={date ? `${formatLongDate(date)}, ${cellBlocks.length} scheduled ${cellBlocks.length === 1 ? 'block' : 'blocks'}` : undefined} data-testid={date ? `calendar-day-${date}` : `calendar-empty-${index}`} style={date && mode === 'transition' ? transitionStyleFor(date, config, overrides) : undefined} className={`relative min-h-[76px] border-b border-r border-white/[.07] p-1.5 text-left transition sm:min-h-[116px] sm:p-3 ${date ? `${modeClass} hover:brightness-110` : 'cursor-default bg-white/[.012]'} ${today ? 'ring-1 ring-inset ring-foreground/80' : ''}`}>
+          {date && <><span className={`flex h-7 w-7 items-center justify-center font-display text-sm font-bold ${today ? 'rounded-full bg-primary text-primary-foreground' : ''}`}>{parseDate(date).getDate()}</span><div className="absolute bottom-2 left-1.5 right-1.5 flex h-[7px] overflow-hidden rounded-[2px] bg-white/[.05] sm:bottom-3 sm:left-3 sm:right-3" data-testid={`calendar-bar-${date}`}>{segments.map((segment, segmentIndex) => <span key={`${date}-segment-${segmentIndex}`} className="h-full shrink-0" style={{ width: `${segment.width}%`, backgroundColor: segment.color ?? 'transparent' }} />)}</div></>}
+        </button>;
+      })}</div>
+    </div>
+  </div></AppShell>;
+}
+
+function YearPage({ config, blocks, templates, overrides, daySettings }: { config: HitchConfig; blocks: Block[]; templates: Template[]; overrides: HitchOverride[]; daySettings: Record<string, DaySettings> }) {
+  const [, navigate] = useLocation();
+  const search = useSearch();
+  const requestedYear = Number(new URLSearchParams(search).get('year'));
+  const [year, setYear] = useState(() => Number.isInteger(requestedYear) && requestedYear > 1900 ? requestedYear : new Date().getFullYear());
+  const today = todayString();
+  const moveYear = (next: number) => {
+    setYear(next);
+    navigate(`/year?year=${next}`, { replace: true });
+  };
+
+  useEffect(() => {
+    if (Number.isInteger(requestedYear) && requestedYear > 1900 && requestedYear !== year) setYear(requestedYear);
+  }, [requestedYear]);
+
+  const months = Array.from({ length: 12 }, (_, monthIndex) => {
+    const firstDate = new Date(year, monthIndex, 1);
+    const first = (firstDate.getDay() + 6) % 7;
+    const dayCount = new Date(year, monthIndex + 1, 0).getDate();
+    const cells = Array.from({ length: Math.ceil((first + dayCount) / 7) * 7 }, (_, index) => {
+      const day = index - first + 1;
+      return day > 0 && day <= dayCount ? toDateString(new Date(year, monthIndex, day)) : null;
+    });
+    return { monthIndex, firstDate, cells };
+  });
+
+  return <AppShell mode={resolveMode(today, config, overrides)}><div className="fade-in mx-auto max-w-[1100px]">
+    <div className="border-b border-white/[.09] pb-5">
+      <div className="flex items-center justify-between gap-3">
+        <div><p className="font-mono-app text-[9px] uppercase text-muted-foreground">Calendar</p><h1 data-testid="text-calendar-year" className="mt-1 font-display text-3xl font-bold sm:text-4xl">{year}</h1></div>
+        <div className="flex shrink-0 items-center gap-1.5">
+          <button type="button" onClick={() => moveYear(new Date().getFullYear())} data-testid="button-calendar-current-year" className="hidden rounded-lg border border-white/[.1] px-3 py-2 text-xs font-semibold text-muted-foreground hover:bg-white/[.06] hover:text-foreground sm:block">This year</button>
+          <button type="button" onClick={() => moveYear(year - 1)} aria-label="Previous year" data-testid="button-previous-year" className="flex h-10 w-10 items-center justify-center rounded-lg border border-white/[.1] text-muted-foreground hover:bg-white/[.08] hover:text-foreground"><ChevronLeft size={17} /></button>
+          <button type="button" onClick={() => moveYear(year + 1)} aria-label="Next year" data-testid="button-next-year" className="flex h-10 w-10 items-center justify-center rounded-lg border border-white/[.1] text-muted-foreground hover:bg-white/[.08] hover:text-foreground"><ChevronRight size={17} /></button>
+        </div>
+      </div>
+      <ViewTabs current="year" date={`${year}-01-01`} />
+    </div>
+    <div className="mt-5 flex items-center justify-end gap-3 font-mono-app text-[8px] uppercase text-muted-foreground sm:text-[9px]"><span className="flex items-center gap-1.5"><i className="h-2 w-2 rounded-full bg-primary" />Work</span><span className="flex items-center gap-1.5"><i className="h-2 w-2 rounded-full bg-secondary" />Home</span><span className="flex items-center gap-1.5"><i className="h-2 w-2 rounded-full bg-accent" />Transition</span></div>
+    <div className="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">{months.map(({ monthIndex, firstDate, cells }) => <section key={monthIndex} className="overflow-hidden rounded-lg border border-white/[.1] bg-black/[.12]" data-testid={`year-month-${monthIndex + 1}`}>
+      <Link href={`/calendar?month=${toDateString(firstDate).slice(0, 7)}`} className="flex items-center justify-between border-b border-white/[.08] px-3 py-2.5 text-sm font-bold text-foreground no-underline hover:bg-white/[.05]"><span>{firstDate.toLocaleDateString(undefined, { month: 'long' })}</span><ChevronRight size={14} className="text-muted-foreground" /></Link>
+      <div className="grid grid-cols-7">{['M', 'T', 'W', 'T', 'F', 'S', 'S'].map((label, index) => <span key={`${label}-${index}`} className="py-1.5 text-center font-mono-app text-[7px] text-muted-foreground">{label}</span>)}{cells.map((date, index) => {
+        if (!date) return <span key={`empty-${index}`} className="min-h-8 border-r border-t border-white/[.05] bg-white/[.01]" />;
+        const mode = resolveMode(date, config, overrides);
+        const direction = mode === 'transition' ? getTransitionDirection(date, config, overrides) : null;
+        const scheduled = blocksForDate(date, blocks, templates, config, overrides, daySettings).length > 0;
+        const modeClass = mode === 'work' ? 'mode-cell-work' : mode === 'home' ? 'mode-cell-home' : `mode-cell-transition ${direction === 'start-work' ? 'mode-cell-transition-start' : ''}`;
+        return <button type="button" key={date} onClick={() => navigate(`/?date=${date}`)} aria-label={formatLongDate(date)} data-testid={`year-day-${date}`} style={mode === 'transition' ? transitionStyleFor(date, config, overrides) : undefined} className={`relative min-h-8 border-r border-t border-white/[.07] text-center font-mono-app text-[8px] transition hover:brightness-125 ${modeClass} ${date === today ? 'ring-1 ring-inset ring-foreground/90' : ''}`}><span>{parseDate(date).getDate()}</span>{scheduled && <span className="absolute bottom-1 left-1/2 h-1 w-1 -translate-x-1/2 rounded-full bg-accent" />}</button>;
+      })}</div>
+    </section>)}</div>
   </div></AppShell>;
 }
 
@@ -471,7 +695,8 @@ function HitchPage({ config, blocks, templates, overrides, setOverrides, daySett
   const days = Array.from({ length: phaseLength }, (_, i) => ({ date: addDays(phaseStart, i), index: i }));
   const todayMode = resolveMode(today, config, overrides);
   return <AppShell mode={todayMode}><div className="fade-in mx-auto max-w-[1100px]">
-    <div className="flex flex-col justify-between gap-5 border-b border-white/[.09] pb-7 sm:flex-row sm:items-end"><div><p className="font-mono-app text-[10px] uppercase tracking-[.2em] text-muted-foreground">Current phase</p><h1 className="mt-3 font-display text-4xl font-bold tracking-[-.06em] sm:text-5xl">{baseMode === 'work' ? 'Work' : 'Home'}<span className="text-primary">.</span></h1></div><div className="rounded-2xl border border-white/[.1] bg-white/[.045] px-4 py-3"><p className="font-mono-app text-[9px] uppercase tracking-[.15em] text-muted-foreground">Day in cycle</p><p data-testid="text-cycle-position" className="mt-1 font-display text-2xl font-bold">{phaseOffset + 1}<span className="text-base text-muted-foreground"> / {phaseLength}</span></p></div></div>
+    <div className="border-b border-white/[.09] pb-5"><ViewTabs current="hitch" date={today} /></div>
+    <div className="mt-6 flex flex-col justify-between gap-5 border-b border-white/[.09] pb-7 sm:flex-row sm:items-end"><div><p className="font-mono-app text-[10px] uppercase tracking-[.2em] text-muted-foreground">Current phase</p><h1 className="mt-3 font-display text-4xl font-bold tracking-[-.06em] sm:text-5xl">{baseMode === 'work' ? 'Work' : 'Home'}<span className="text-primary">.</span></h1></div><div className="rounded-2xl border border-white/[.1] bg-white/[.045] px-4 py-3"><p className="font-mono-app text-[9px] uppercase tracking-[.15em] text-muted-foreground">Day in cycle</p><p data-testid="text-cycle-position" className="mt-1 font-display text-2xl font-bold">{phaseOffset + 1}<span className="text-base text-muted-foreground"> / {phaseLength}</span></p></div></div>
     <div className={`mt-8 rounded-2xl border p-5 ${baseMode === 'work' ? 'border-primary/20 bg-primary/[.08]' : 'border-secondary/25 bg-secondary/[.09]'}`}><div className="flex items-center justify-between"><div className="flex items-center gap-2 text-sm font-bold">{baseMode === 'work' ? <BriefcaseBusiness size={16} className="text-primary" /> : <HomeIcon size={16} className="text-secondary-foreground" />}<span>{baseMode === 'work' ? 'Work phase' : 'Home phase'}</span></div><span className={`font-mono-app text-[10px] ${baseMode === 'work' ? 'text-primary' : 'text-[#74c8b3]'}`}>{phaseLength} days</span></div><div className="mt-4 h-2 rounded-full bg-black/20"><div className={`h-2 rounded-full ${baseMode === 'work' ? 'bg-primary' : 'bg-secondary'}`} style={{ width: `${((phaseOffset + 1) / phaseLength) * 100}%` }} /></div><div className="mt-3 flex items-center justify-between text-xs text-muted-foreground"><span>Day {phaseOffset + 1} of {phaseLength}</span><span>{formatShortDate(phaseStart)} — {formatShortDate(addDays(phaseStart, phaseLength - 1))}</span></div></div>
     <div className="mt-8 flex items-center justify-between"><div><p className="font-mono-app text-[10px] uppercase tracking-[.18em] text-muted-foreground">Phase days</p><h2 className="mt-2 font-display text-xl font-bold">{phaseLength} days</h2></div></div>
      <div className="mt-4 grid grid-cols-4 gap-2 sm:grid-cols-7 lg:grid-cols-14">{days.map(({ date, index }) => { const isToday = date === today; const count = blocksForDate(date, blocks, templates, config, overrides, daySettings).length; const dayMode = resolveMode(date, config, overrides); const direction = dayMode === 'transition' ? getTransitionDirection(date, config, overrides) : null; const modeClass = dayMode === 'work' ? 'mode-cell-work' : dayMode === 'home' ? 'mode-cell-home' : `mode-cell-transition ${direction === 'start-work' ? 'mode-cell-transition-start' : ''}`; return <button type="button" key={date} onClick={() => navigate(`/?date=${date}`)} data-testid={`hitch-day-${date}`} style={dayMode === 'transition' ? transitionStyleFor(date, config, overrides) : undefined} className={`group relative min-h-[92px] overflow-hidden rounded-xl border p-2 text-left transition hover:-translate-y-0.5 hover:brightness-110 ${modeClass} ${isToday ? 'border-foreground/80 ring-1 ring-foreground/80' : 'border-white/[.1]'}`}><span className="font-mono-app text-[9px] opacity-70">DAY {index + 1}</span><span className={`mt-2 block font-display text-xl font-bold ${isToday ? '' : 'opacity-90'}`}>{parseDate(date).getDate()}</span>{count > 0 && <span className="absolute right-2 top-2 h-1.5 w-1.5 rounded-full bg-accent" />}</button>; })}</div>
@@ -486,7 +711,8 @@ function SettingsPage({ config, setConfig, overrides, setOverrides, daySettings,
   const saveConfig = () => { const next = normalizeConfig({ ...draft, homePhaseLength: customHomeLength ? draft.homePhaseLength : draft.workPhaseLength, defaultNightShift: config.defaultNightShift }); setDraft(next); setConfig(next); };
   const toggleDayNight = () => { const date = todayString(); const current = daySettings[date]?.nightShiftOverride ?? config.defaultNightShift; setDaySettings({ ...daySettings, [date]: { transitionHour: daySettings[date]?.transitionHour, nightShiftOverride: !current } }); };
   return <AppShell mode={resolveMode(todayString(), config, overrides)}><div className="fade-in mx-auto max-w-[960px]">
-    <div className="border-b border-white/[.09] pb-7"><p className="font-mono-app text-[10px] uppercase tracking-[.2em] text-muted-foreground">Tune the cockpit</p><h1 className="mt-3 font-display text-4xl font-bold tracking-[-.06em] sm:text-5xl">Settings<span className="text-primary">.</span></h1><p className="mt-3 max-w-lg text-sm leading-6 text-muted-foreground">Your defaults live on this device. No account, no sync, no surprises.</p></div>
+    <div className="border-b border-white/[.09] pb-5"><ViewTabs date={todayString()} /></div>
+    <div className="border-b border-white/[.09] py-7"><p className="font-mono-app text-[10px] uppercase tracking-[.2em] text-muted-foreground">Tune the cockpit</p><h1 className="mt-3 font-display text-4xl font-bold tracking-[-.06em] sm:text-5xl">Settings<span className="text-primary">.</span></h1><p className="mt-3 max-w-lg text-sm leading-6 text-muted-foreground">Your defaults live on this device. No account, no sync, no surprises.</p></div>
     <div className="mt-8 grid gap-8 lg:grid-cols-[1.1fr_.9fr]">
        <div className="space-y-6">
         <section className="rounded-2xl border border-white/[.1] bg-white/[.035] p-5 sm:p-6"><div className="mb-6 flex items-start justify-between"><div><p className="font-mono-app text-[10px] uppercase tracking-[.18em] text-primary">01 / rhythm</p><h2 className="mt-2 font-display text-xl font-bold">Cycle configuration</h2><p className="mt-1 text-xs text-muted-foreground">Set when your hitch starts, how long you work, and when the colors change.</p></div><SlidersHorizontal size={20} className="text-muted-foreground" /></div><label className="mb-4 block"><span className="mb-2 block text-xs font-semibold text-muted-foreground">Cycle starts</span><input type="date" value={draft.cycleStartDate} onChange={(e) => setDraft({ ...draft, cycleStartDate: e.target.value })} data-testid="input-cycle-start" className="w-full rounded-xl border border-white/[.12] bg-black/[.16] px-3 py-3 text-sm outline-none focus:border-primary/70" /></label><label className="block"><span className="mb-2 block text-xs font-semibold text-muted-foreground">Hitch length</span><input type="number" min="1" max="90" value={draft.workPhaseLength} onChange={(e) => setDraft({ ...draft, workPhaseLength: Number(e.target.value), homePhaseLength: customHomeLength ? draft.homePhaseLength : Number(e.target.value) })} data-testid="input-hitch-length" className="w-full rounded-xl border border-white/[.12] bg-black/[.16] px-3 py-3 text-sm outline-none focus:border-primary/70" /></label><label className="mt-4 flex cursor-pointer items-center gap-3 rounded-xl border border-white/[.1] bg-black/[.12] p-3"><input type="checkbox" checked={customHomeLength} onChange={(e) => { const enabled = e.target.checked; setCustomHomeLength(enabled); if (!enabled) setDraft({ ...draft, homePhaseLength: draft.workPhaseLength }); }} data-testid="checkbox-custom-home-length" className="h-4 w-4 accent-[hsl(var(--primary))]" /><span><span className="block text-xs font-semibold">Use a custom Home length</span><span className="mt-1 block text-[11px] text-muted-foreground">{customHomeLength ? 'Set Home days separately.' : `Home automatically matches your ${draft.workPhaseLength}-day hitch.`}</span></span></label>{customHomeLength && <label className="mt-4 block"><span className="mb-2 block text-xs font-semibold text-muted-foreground">Home days</span><input type="number" min="1" max="90" value={draft.homePhaseLength} onChange={(e) => setDraft({ ...draft, homePhaseLength: Number(e.target.value) })} data-testid="input-home-length" className="w-full rounded-xl border border-white/[.12] bg-black/[.16] px-3 py-3 text-sm outline-none focus:border-primary/70" /></label>}<div className="mt-5 grid gap-3 sm:grid-cols-2"><label><span className="mb-2 block text-xs font-semibold text-muted-foreground">Go Home color change</span><select value={draft.goHomeTransitionHour} onChange={(e) => setDraft({ ...draft, goHomeTransitionHour: Number(e.target.value) })} data-testid="select-go-home-transition-hour" className="w-full rounded-xl border border-white/[.12] bg-black/[.16] px-3 py-3 font-mono-app text-xs outline-none focus:border-primary/70">{Array.from({ length: 24 }, (_, hour) => <option key={hour} value={hour}>{timeLabel(`${String(hour).padStart(2, '0')}:00`)}</option>)}</select></label><label><span className="mb-2 block text-xs font-semibold text-muted-foreground">Start Work color change</span><select value={draft.startWorkTransitionHour} onChange={(e) => setDraft({ ...draft, startWorkTransitionHour: Number(e.target.value) })} data-testid="select-start-work-transition-hour" className="w-full rounded-xl border border-white/[.12] bg-black/[.16] px-3 py-3 font-mono-app text-xs outline-none focus:border-primary/70">{Array.from({ length: 24 }, (_, hour) => <option key={hour} value={hour}>{timeLabel(`${String(hour).padStart(2, '0')}:00`)}</option>)}</select></label></div><button type="button" onClick={saveConfig} data-testid="button-save-cycle" className="mt-5 flex items-center gap-2 rounded-xl bg-primary px-4 py-3 text-xs font-bold text-primary-foreground hover:brightness-110"><Save size={15} />Save cycle</button></section>
@@ -619,12 +845,11 @@ function Router() {
     setBlocks(blocks.filter((block) => !(block.date === date && block.templateId)));
     setDaySettings({ ...daySettings, [date]: { ...current, detached: false, pinnedTemplateId: undefined } });
   };
-  const [, navigate] = useLocation();
-  const goToDate = (date: string) => navigate(`/?date=${date}`);
   return <Switch>
-    <Route path="/"><TodayPage config={config} blocks={blocks} templates={templates} overrides={overrides} daySettings={daySettings} onCreateBlock={addBlock} onUpdateBlock={updateBlock} onDeleteBlock={deleteBlock} onSetDaySettings={(date, settings) => setDaySettings({ ...daySettings, [date]: settings })} onResetDay={resetDayToTemplate} onClearDay={clearDay} onSaveTemplate={saveDayTemplate} onUseTemplate={useDayTemplate} onUpdateTemplate={updateTemplate} onDeleteTemplate={deleteTemplate} /></Route>
-    <Route path="/calendar"><CalendarPage config={config} blocks={blocks} templates={templates} overrides={overrides} daySettings={daySettings} /></Route>
+    <Route path="/"><DayPage config={config} blocks={blocks} templates={templates} overrides={overrides} daySettings={daySettings} onCreateBlock={addBlock} onUpdateBlock={updateBlock} onDeleteBlock={deleteBlock} onSetDaySettings={(date, settings) => setDaySettings({ ...daySettings, [date]: settings })} onResetDay={resetDayToTemplate} onClearDay={clearDay} onSaveTemplate={saveDayTemplate} onUseTemplate={useDayTemplate} onUpdateTemplate={updateTemplate} onDeleteTemplate={deleteTemplate} /></Route>
+    <Route path="/calendar"><MonthPage config={config} blocks={blocks} templates={templates} overrides={overrides} daySettings={daySettings} /></Route>
     <Route path="/hitch"><HitchPage config={config} blocks={blocks} templates={templates} overrides={overrides} setOverrides={setOverrides} daySettings={daySettings} /></Route>
+    <Route path="/year"><YearPage config={config} blocks={blocks} templates={templates} overrides={overrides} daySettings={daySettings} /></Route>
     <Route path="/settings"><SettingsPage config={config} setConfig={setConfig} overrides={overrides} setOverrides={setOverrides} daySettings={daySettings} setDaySettings={setDaySettings} /></Route>
     <Route component={NotFound} />
   </Switch>;
