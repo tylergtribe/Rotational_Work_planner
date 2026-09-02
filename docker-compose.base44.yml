@@ -1,0 +1,33 @@
+services:
+  web:
+    image: node:24-slim
+    working_dir: /app
+    volumes:
+      - ./:/app
+      # persist node_modules across restarts without polluting the repo
+      - web_node_modules:/app/node_modules
+    ports:
+      - "3000:3000"
+    environment:
+      - PORT=3000
+      - BASE_PATH=/
+      - NODE_ENV=development
+      # skip pnpm 11's pre-script deps verification (it re-runs install and fails on ignored builds)
+      - PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN=false
+      # intentionally NOT set: REPL_ID (keeps Replit-only vite plugins disabled)
+    command: >
+      sh -c "
+        corepack enable pnpm &&
+        pnpm install --frozen-lockfile;
+        pnpm rebuild esbuild @swc/core;
+        pnpm --filter @workspace/hitch-planner run dev
+      "
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+
+volumes:
+  web_node_modules:
